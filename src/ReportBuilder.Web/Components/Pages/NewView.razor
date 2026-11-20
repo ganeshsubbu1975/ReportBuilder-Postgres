@@ -1,0 +1,310 @@
+@page "/views/new"
+@page "/views/edit/{DraftId:int}"
+@rendermode InteractiveServer
+@inject IViewStore Views
+@inject PolicyGate Gate
+@inject Microsoft.Extensions.Options.IOptions<PolicyOptions> Policy
+@inject AuthenticationStateProvider Auth
+@inject UserContextFactory Users
+
+<PageTitle>@(_editing ? "Edit view" : "New view")</PageTitle>
+<div class="page-head">
+    <div>
+        <h1>@(_editing ? "Edit view" : "New view")</h1>
+        <p class="sub">@if (_req.ReplaceExisting) {<text>Change rpt.@_req.Name. The change is sent for approval and the live view is replaced only when a catalog owner approves it. Removing or renaming a column can break metrics that use it.</text>} else if (_updateId is not null) {<text>This draft is still waiting for approval. Saving replaces its contents.</text>} else {<text>Combine ERP tables into a reporting view that metrics can use. Tables and columns are picked from lists, no SQL is typed. The view is created only after a catalog owner approves it.</text>}</p>
+    </div>
+    <a class="outline" href="views">Back to Views</a>
+</div>
+
+@if (!_loaded)
+{
+    <p class="muted">Loading...</p>
+}
+else if (!_isOwner)
+{
+    <p class="card">Only catalog owners can design views.</p>
+}
+else if (_error is not null)
+{
+    <p class="card sev-failure">@_error</p>
+}
+else
+{
+    <div class="two-col">
+        <section class="card form">
+            <h2>1. Describe it</h2>
+            <label class="field"><span>View name (lower case, ends in _v)</span><input @bind="_req.Name" @bind:event="oninput" maxlength="60" disabled="@_req.ReplaceExisting" placeholder="payroll_by_department_v" /></label>
+            <label class="field"><span>What it is for</span><textarea rows="2" @bind="_req.Description" @bind:event="oninput" maxlength="400"></textarea></label>
+
+            <h2>2. Choose the tables</h2>
+            <label class="field"><span>Main table</span>
+                <select value="@_req.BaseSource" @onchange="OnBaseChanged">
+                    <option value="">Select a table...</option>
+                    @foreach (var t in _sources.Keys.Order()) { <option value="@t">@t</option> }
+                </select></label>
+
+            @for (var i = 0; i < _req.Joins.Count; i++)
+            {
+                var idx = i;
+                var j = _req.Joins[idx];
+                <div class="field-row">
+                    <label class="field"><span>Join</span>
+                        <select value="@j.Type" @onchange="e => SetJoinType(j, e.Value?.ToString())"><option value="INNER">only matching rows</option><option value="LEFT">keep all rows of the earlier tables</option></select></label>
+                    <label class="field"><span>Table</span>
+                        <select value="@j.Source" @onchange="e => SetJoinSource(j, e.Value?.ToString())">
+                            <option value="">Select a table...</option>
+                            @foreach (var t in _sources.Keys.Order()) { <option value="@t">@t</option> }
+                        </select></label>
+                </div>
+                <div class="field-row">
+                    <label class="field"><span>Where this column</span>
+                        <select value="@(j.LeftSource + "|" + j.LeftColumn)" @onchange="e => SetJoinLeft(j, e.Value?.ToString())">
+                            <option value="">Select a column...</option>
+                            @foreach (var o in ColumnsUpTo(idx + 1)) { <option value="@o.Key">@o.Label</option> }
+                        </select></label>
+                    <label class="field"><span>equals this column of @(j.Source == "" ? "the new table" : j.Source)</span>
+                        <select value="@j.RightColumn" @onchange="e => SetJoinRight(j, e.Value?.ToString())">
+                            <option value="">Select a column...</option>
+                            @foreach (var c in SourceColumns(j.Source)) { <option value="@c.Name">@c.Name (@c.DataType)</option> }
+                        </select></label>
+                    <button type="button" @onclick="() => RemoveJoin(idx)">Remove</button>
+                </div>
+            }
+            @if (_req.BaseSource != "" && _req.Joins.Count < 3)
+            {
+                <button type="button" @onclick="AddJoin">+ Join another table</button>
+            }
+
+            @if (_req.BaseSource != "")
+            {
+                <h2>3. Company and columns</h2>
+                <label class="field"><span>Which column is the company code?</span>
+                    <select value="@(_req.Company.Source + "|" + _req.Company.Column)" @onchange="e => SetCompany(e.Value?.ToString())">
+                        <option value="">Select a column...</option>
+                        @foreach (var o in ColumnsUpTo(_req.Joins.Count + 1)) { <option value="@o.Key">@o.Label</option> }
+                    </select></label>
+                <div class="field"><span>Columns to include (up to 30). Restricted columns are not offered.</span>
+                    @for (var s = 0; s <= _req.Joins.Count; s++)
+                    {
+                        var src = s;
+                        <p class="muted"><strong>@SourceName(src)</strong></p>
+                        <div class="check-grid">
+                            @foreach (var c in SourceColumns(SourceName(src)).Where(Allowed))
+                            {
+                                <label class="check"><input type="checkbox" checked="@IsPicked(src, c.Name)" @onchange="e => TogglePick(src, c.Name, (bool)(e.Value ?? false))" />@c.Name</label>
+                            }
+                        </div>
+                    }
+                </div>
+                @if (_req.Columns.Count > 0)
+                {
+                    <div class="field"><span>Names in the view (change one if two columns share a name)</span>
+                        @foreach (var c in _req.Columns)
+                        {
+                            <div class="field-row"><span class="muted">@SourceName(c.Source).@c.Column</span><input @bind="c.Alias" @bind:event="oninput" maxlength="60" /></div>
+                        }
+                    </div>
+                }
+            }
+
+            <div class="form-actions">
+                <label class="select-pill"><span>Preview for company</span>
+                    <select @bind="_company">@foreach (var c in _companies) { <option>@c</option> }</select></label>
+                <button disabled="@(_busy || _req.BaseSource == "")" @onclick="PreviewAsync">Preview</button>
+                <button class="primary" disabled="@(_busy || _req.BaseSource == "")" @onclick="SaveAsync">@(_req.ReplaceExisting ? "Send change for approval" : _updateId is not null ? "Save draft" : "Send for approval")</button>
+            </div>
+        </section>
+
+        <div class="right-col">
+            @if (_issues.Count > 0)
+            {
+                <section class="card"><h2>Fix these first</h2><ul class="findings">@foreach (var i in _issues) { <li class="sev-failure">@i</li> }</ul></section>
+            }
+            @if (_built is { Ok: true })
+            {
+                <section class="card"><h2>What will be created</h2><details open><summary>SQL (built from the choices, not typed)</summary><pre>CREATE VIEW rpt.@_req.Name AS
+@_built.Sql</pre></details></section>
+            }
+            @if (_sample is { } s2)
+            {
+                <section class="card">
+                    <h2>Preview for company @_company</h2>
+                    <p class="muted">First @s2.Rows.Count rows.</p>
+                    <div class="scroll"><table>
+                        <thead><tr>@foreach (var c in s2.Columns) { <th>@c</th> }</tr></thead>
+                        <tbody>@foreach (var row in s2.Rows) { <tr>@foreach (var cell in row) { <td>@cell</td> }</tr> }</tbody>
+                    </table></div>
+                </section>
+            }
+            @if (_message is not null)
+            {
+                <section class="card"><p class="@(_saved ? "pos" : "")">@_message</p>@if (_saved) { <a class="outline link-btn" href="views">See it on Views</a> }</section>
+            }
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public int? DraftId { get; set; }
+    private int? _updateId;
+    private bool _editing => DraftId is not null;
+    private bool _loaded, _isOwner, _busy, _saved;
+    private string? _error, _message;
+    private string _user = "", _company = "";
+    private string[] _companies = [];
+    private readonly ViewRequest _req = new();
+    private IReadOnlyDictionary<string, ViewColumn[]> _sources = new Dictionary<string, ViewColumn[]>();
+    private IReadOnlyList<string> _existing = [];
+    private List<string> _issues = new();
+    private ViewBuildResult? _built;
+    private ViewPreview? _sample;
+
+    private sealed record Opt(string Key, string Label);
+
+    protected override async Task OnInitializedAsync()
+    {
+        var user = Users.From((await Auth.GetAuthenticationStateAsync()).User);
+        _user = user.UserName;
+        var policy = Gate.Resolve(user);
+        _isOwner = policy.CatalogOwner;
+        if (_isOwner)
+        {
+            try
+            {
+                _sources = await Views.GetSourcesAsync(CancellationToken.None);
+                _existing = await Views.GetExistingViewsAsync(CancellationToken.None);
+                _companies = Gate.VisibleCompanies(policy).ToArray();
+                _company = _companies.FirstOrDefault() ?? "";
+                if (DraftId is int id) await LoadDraftAsync(id);
+            }
+            catch (Exception ex) { _error = "The view designer could not reach the database: " + ex.Message; }
+        }
+        _loaded = true;
+    }
+
+    private async Task LoadDraftAsync(int id)
+    {
+        var draft = (await Views.GetDraftsAsync(CancellationToken.None)).FirstOrDefault(d => d.DraftId == id);
+        if (draft is null) { _error = "That draft no longer exists."; return; }
+        var saved = System.Text.Json.JsonSerializer.Deserialize<ViewRequest>(draft.DefinitionJson);
+        if (saved is null) { _error = "That draft cannot be opened for editing."; return; }
+        _req.Name = saved.Name; _req.Description = saved.Description; _req.BaseSource = saved.BaseSource;
+        _req.Joins = saved.Joins; _req.Company = saved.Company; _req.Columns = saved.Columns;
+        // pending: change the draft in place. approved: an edit of the live view (ALTER on approval). rejected: resubmit as a new view.
+        _updateId = draft.Status == "PENDING" ? draft.DraftId : null;
+        _req.ReplaceExisting = draft.Status == "APPROVED" || (draft.Status == "PENDING" && saved.ReplaceExisting);
+        if (draft.Status == "APPROVED" && !_existing.Contains(draft.Name, StringComparer.OrdinalIgnoreCase))
+            _error = $"rpt.{draft.Name} no longer exists, so it cannot be edited.";
+    }
+
+    private bool Allowed(ViewColumn c) => !Policy.Value.BlockedColumns.Contains(c.Name, StringComparer.OrdinalIgnoreCase);
+    private ViewColumn[] SourceColumns(string source) => _sources.TryGetValue(source ?? "", out var c) ? c : [];
+    private string SourceName(int i) => i == 0 ? _req.BaseSource : i - 1 < _req.Joins.Count ? _req.Joins[i - 1].Source : "";
+
+    private IEnumerable<Opt> ColumnsUpTo(int sourceCount)
+    {
+        for (var s = 0; s < sourceCount; s++)
+            foreach (var c in SourceColumns(SourceName(s)).Where(Allowed))
+                yield return new Opt(s + "|" + c.Name, SourceName(s) + "." + c.Name);
+    }
+
+    private bool IsPicked(int src, string col) => _req.Columns.Any(c => c.Source == src && c.Column == col);
+
+    private void TogglePick(int src, string col, bool on)
+    {
+        _req.Columns.RemoveAll(c => c.Source == src && c.Column == col);
+        if (on) _req.Columns.Add(new ViewColumnSpec { Source = src, Column = col, Alias = DefaultAlias(src, col) });
+    }
+
+    // every picked column starts with an alias; if the plain name is already used (company_code is always taken by the company column), prefix the table name
+    private string DefaultAlias(int src, string col)
+    {
+        bool Taken(string a) => a.Equals("company_code", StringComparison.OrdinalIgnoreCase)
+            || _req.Columns.Any(c => string.Equals(c.Alias, a, StringComparison.OrdinalIgnoreCase));
+        if (!Taken(col)) return col;
+        var table = SourceName(src).Split('.').Last().ToLowerInvariant();
+        var alias = $"{table}_{col}";
+        for (var n = 2; Taken(alias); n++) alias = $"{table}_{col}_{n}";
+        return alias;
+    }
+
+    private void OnBaseChanged(ChangeEventArgs e)
+    {
+        _req.BaseSource = e.Value?.ToString() ?? "";
+        _req.Joins.Clear(); _req.Columns.Clear(); _req.Company = new(); _built = null; _sample = null;
+    }
+
+    private void AddJoin() => _req.Joins.Add(new JoinSpec());
+
+    private void RemoveJoin(int idx)
+    {
+        _req.Joins.RemoveAt(idx);
+        _req.Columns.RemoveAll(c => c.Source > idx);
+        if (_req.Company.Source > idx) _req.Company = new();
+        foreach (var j in _req.Joins.Skip(idx).Where(j => j.LeftSource > idx)) { j.LeftSource = 0; j.LeftColumn = ""; }
+    }
+
+    private static void SetJoinType(JoinSpec j, string? v) => j.Type = v ?? "INNER";
+    private static void SetJoinRight(JoinSpec j, string? v) => j.RightColumn = v ?? "";
+    private void SetJoinSource(JoinSpec j, string? v) { j.Source = v ?? ""; j.RightColumn = ""; }
+
+    private void SetJoinLeft(JoinSpec j, string? v)
+    {
+        var (s, c) = Split(v);
+        j.LeftSource = s; j.LeftColumn = c;
+    }
+
+    private void SetCompany(string? v)
+    {
+        var (s, c) = Split(v);
+        _req.Company = new ViewColumnSpec { Source = s, Column = c };
+    }
+
+    private static (int, string) Split(string? v)
+    {
+        var parts = (v ?? "").Split('|', 2);
+        return parts.Length == 2 && int.TryParse(parts[0], out var s) ? (s, parts[1]) : (0, "");
+    }
+
+    private void Build()
+    {
+        _built = ViewBuilder.Build(_req, _sources, Policy.Value.BlockedColumns, _existing);
+        _issues = _built.Issues.ToList();
+    }
+
+    private async Task PreviewAsync()
+    {
+        _message = null; _sample = null; Build();
+        if (!_built!.Ok) return;
+        _busy = true;
+        try { _sample = await Views.PreviewAsync(_built.Sql, _company, CancellationToken.None); }
+        catch (Exception ex) { _issues.Add("The preview failed: " + ex.Message); }
+        finally { _busy = false; }
+    }
+
+    private async Task SaveAsync()
+    {
+        _message = null; _saved = false; Build();
+        if (!_built!.Ok) return;
+        _busy = true;
+        try
+        {
+            var json = System.Text.Json.JsonSerializer.Serialize(_req);
+            if (_updateId is int uid)
+            {
+                await Views.UpdateDraftAsync(uid, _req.Name.Trim(), _req.Description.Trim(), json, _built.Sql, CancellationToken.None);
+                _message = $"The draft for rpt.{_req.Name.Trim()} was updated. It is still waiting for approval.";
+            }
+            else
+            {
+                await Views.SaveDraftAsync(_req.Name.Trim(), _req.Description.Trim(), json, _built.Sql, _user, CancellationToken.None);
+                _message = _req.ReplaceExisting
+                    ? $"The change to rpt.{_req.Name.Trim()} was sent for approval. The view is replaced when a catalog owner approves it."
+                    : $"rpt.{_req.Name.Trim()} was sent for approval. It is created when a catalog owner approves it.";
+            }
+            _saved = true;
+        }
+        catch (Exception ex) { _message = "Could not save: " + ex.Message; }
+        finally { _busy = false; }
+    }
+}

@@ -1,0 +1,99 @@
+@page "/views"
+@rendermode InteractiveServer
+@inject IViewStore Store
+@inject PolicyGate Gate
+@inject AuthenticationStateProvider Auth
+@inject UserContextFactory Users
+
+<PageTitle>Views</PageTitle>
+<div class="page-head"><div><h1>Views</h1><p class="sub">Reporting views designed here wait for a catalog owner to approve them. Approving creates the view in the rpt schema so metrics can use it.</p></div><a class="outline primary-link" href="views/new">+ New view</a></div>
+
+@if (!_loaded)
+{
+    <p class="muted">Loading...</p>
+}
+else if (!_isOwner)
+{
+    <p class="card">Only catalog owners can manage views.</p>
+}
+else
+{
+    @if (_message is not null) { <p class="card">@_message</p> }
+    <section class="card">
+        @foreach (var d in _drafts)
+        {
+            <div class="entry">
+                <div class="badges">
+                    <span class="badge status-@(d.Status == "APPROVED" ? "certified" : d.Status == "REJECTED" ? "rejected" : "unverified")">@d.Status</span>
+                    <strong>rpt.@d.Name</strong>
+                    <span class="muted">designed by @d.CreatedBy on @d.CreatedAt.ToString("yyyy-MM-dd HH:mm") UTC</span>
+                </div>
+                <p>@d.Description</p>
+                <details><summary>SQL</summary><pre>@d.SqlText</pre></details>
+                @if (d.ReviewedBy is not null)
+                {
+                    <p class="muted">Reviewed by @d.ReviewedBy on @(d.ReviewedAt?.ToString("yyyy-MM-dd HH:mm")) UTC @(string.IsNullOrEmpty(d.ReviewNote) ? "" : "- " + d.ReviewNote)</p>
+                }
+                @if (d.Status == "REJECTED")
+                {
+                    <p><a class="outline link-btn" href="views/edit/@d.DraftId">Revise and resubmit</a></p>
+                }
+                else if (d.Status == "APPROVED" && IsLatestApproved(d))
+                {
+                    <p><a class="outline link-btn" href="views/edit/@d.DraftId">Edit view</a></p>
+                }
+                @if (d.Status == "PENDING")
+                {
+                    <div class="review">
+                        <a class="outline link-btn" href="views/edit/@d.DraftId">Edit draft</a>
+                        <input placeholder="Review note (optional)" @bind="_notes[d.DraftId]" />
+                        <button class="primary" disabled="@_busy" @onclick="() => ReviewAsync(d.DraftId, true)">Approve and create</button>
+                        <button disabled="@_busy" @onclick="() => ReviewAsync(d.DraftId, false)">Reject</button>
+                    </div>
+                }
+            </div>
+        }
+        @if (_drafts.Count == 0) { <p class="muted">No designed views yet.</p> }
+    </section>
+}
+
+@code {
+    private bool _loaded, _isOwner, _busy;
+    private string _reviewer = "";
+    private string? _message;
+    private List<ViewDraft> _drafts = new();
+    private readonly Dictionary<int, string> _notes = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        var user = Users.From((await Auth.GetAuthenticationStateAsync()).User);
+        _reviewer = user.UserName;
+        _isOwner = Gate.Resolve(user).CatalogOwner;
+        if (_isOwner) await RefreshAsync();
+        _loaded = true;
+    }
+
+    // only the newest approved draft of a name is offered for editing, so an edit always starts from what is live
+    private bool IsLatestApproved(ViewDraft d) =>
+        _drafts.Where(x => x.Status == "APPROVED" && x.Name.Equals(d.Name, StringComparison.OrdinalIgnoreCase)).Max(x => x.DraftId) == d.DraftId;
+
+    private async Task RefreshAsync()
+    {
+        try { _drafts = (await Store.GetDraftsAsync(CancellationToken.None)).ToList(); }
+        catch (Exception ex) { _message = "Could not load views: " + ex.Message; }
+        foreach (var d in _drafts) _notes.TryAdd(d.DraftId, "");
+    }
+
+    private async Task ReviewAsync(int id, bool approve)
+    {
+        _busy = true; _message = null;
+        try
+        {
+            await Store.ReviewAsync(id, approve, _reviewer, _notes.GetValueOrDefault(id), CancellationToken.None);
+            _message = approve ? "The view was created." : "The draft was rejected.";
+        }
+        catch (Exception ex) { _message = (approve ? "Could not create the view: " : "Could not reject: ") + ex.Message; }
+        finally { _busy = false; }
+        await RefreshAsync();
+    }
+}

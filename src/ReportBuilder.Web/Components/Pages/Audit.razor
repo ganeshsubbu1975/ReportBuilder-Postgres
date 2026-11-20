@@ -1,0 +1,154 @@
+@page "/audit"
+@rendermode InteractiveServer
+@inject ReportBuilder.Core.Data.IAuditStore Store
+@inject ICatalogStore Catalog
+@inject PolicyGate Gate
+@inject AuthenticationStateProvider Auth
+@inject UserContextFactory Users
+@inject NavigationManager Nav
+@inject IJSRuntime Js
+
+<PageTitle>Audit trail</PageTitle>
+
+<div class="page-head">
+    <div>
+        <h1>Audit trail</h1>
+        <p class="sub">Every report can be traced from the question to the numbers. Records are append-only.</p>
+    </div>
+    <div class="actions">
+        <label class="select-pill"><select @bind="_days" @bind:after="LoadAsync"><option value="1">Last 24 hours</option><option value="7">Last 7 days</option><option value="30">Last 30 days</option></select></label>
+        <label class="select-pill"><select @bind="_outcome"><option value="">All outcomes</option><option>Certified</option><option>Unverified</option><option>Blocked</option><option>Failed</option><option>Other</option></select></label>
+        <button class="outline" disabled="@(Visible.Count == 0)" @onclick="ExportAsync">Export log</button>
+    </div>
+</div>
+
+@if (_error is not null)
+{
+    <p class="card sev-failure">@_error</p>
+}
+else if (!_loaded)
+{
+    <p class="muted">Loading...</p>
+}
+else
+{
+    <div class="two-col audit">
+        <section class="card runs">
+            <h2>Recent runs</h2>
+            @foreach (var run in Visible)
+            {
+                var o = Outcome(run);
+                <button class="run @(_selected?.RunId == run.RunId ? "sel" : "")" @onclick="() => _selected = run">
+                    <span class="run-top"><span class="muted">@UiText.When(run.RunAtUtc) · @RoleOf(run)</span><span class="state @o.ToLowerInvariant()">@o</span></span>
+                    <span class="run-q">@Trim(run.Question)</span>
+                </button>
+            }
+            @if (Visible.Count == 0) { <p class="muted">No runs in this period.</p> }
+            @if (_chain is not null) { <p class="muted chain">@_chain</p> }
+        </section>
+
+        <div class="right-col">
+            @if (_selected is { } s)
+            {
+                var m = _metrics.GetValueOrDefault(s.MetricId ?? -1);
+                <section class="card">
+                    <div class="chart-head"><h2>Lineage of the selected run</h2><span class="state @Outcome(s).ToLowerInvariant()">@Outcome(s)</span></div>
+                    <ol class="lineage">
+                        <li><span class="n">1</span><div><div class="l-title">Prompt <code>as typed</code></div><p>@s.Question</p></div></li>
+                        <li><span class="n">2</span><div><div class="l-title">Metric <code>@(m is null ? "none selected" : "catalog #" + m.MetricId)</code></div>
+                            <p>@(m is null ? "No metric was chosen for this request." : $"{m.Name} on rpt.{m.ViewName}, measured as {m.MeasureExpr}. Compiled from reviewed catalog parts for company and filters in the question.")</p></div></li>
+                        <li><span class="n">3</span><div><div class="l-title">Compiled SQL <code>@(m is null ? "no template" : "template " + Slug(m.Name))</code></div>
+                            @if (string.IsNullOrEmpty(s.Sql)) { <p>No SQL was produced.</p> } else { <pre>@s.Sql</pre> }</div></li>
+                        <li><span class="n">4</span><div><div class="l-title">Result <code>hash @UiText.Short(s.RowHash)</code></div>
+                            <p>@ResultText(s) The hash chains this record to the one before it, which proves the entry was not altered afterwards.</p></div></li>
+                        <li><span class="n">5</span><div><div class="l-title">Delivered to <code>run as current user</code></div>
+                            <p>@s.UserName. @(s.Status is "Answered" or "Reconciled" ? "Viewed on screen." : "Nothing was delivered.") (@s.DurationMs ms)</p></div></li>
+                    </ol>
+                </section>
+            }
+            <section class="card">
+                <h2>Policies applied to this run</h2>
+                <div class="grid-2">
+                    <div class="map-card"><div class="term">Read-only</div><p class="muted">No schema or data changes can be issued by any agent.</p></div>
+                    <div class="map-card"><div class="term">Row-level scope</div><p class="muted">Results are limited to the company codes you may see.</p></div>
+                    <div class="map-card"><div class="term">Column masking</div><p class="muted">Restricted columns are blocked unless your role allows them.</p></div>
+                    <div class="map-card"><div class="term">Certified label</div><p class="muted">A report is labeled certified only when every metric in it is certified.</p></div>
+                </div>
+            </section>
+        </div>
+    </div>
+}
+
+@code {
+    private bool _loaded;
+    private string? _error, _chain;
+    private int _days = 7;
+    private string _outcome = "";
+    private bool _owner;
+    private UserContext _user = new();
+    private List<AuditRun> _runs = new();
+    private Dictionary<int, MetricEntry> _metrics = new();
+    private AuditRun? _selected;
+
+    protected override async Task OnInitializedAsync()
+    {
+        var state = await Auth.GetAuthenticationStateAsync();
+        _user = Users.From(state.User);
+        _owner = Gate.Resolve(_user).CatalogOwner;
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        try
+        {
+            _metrics = (await Catalog.GetMetricsAsync(CancellationToken.None)).ToDictionary(x => x.MetricId);
+            _runs = (await Store.GetRecentAsync(DateTime.UtcNow.AddDays(-_days), _owner ? null : _user.UserName, 200, CancellationToken.None)).ToList();
+            var q = new Uri(Nav.Uri).Query;
+            var wanted = System.Web.HttpUtility.ParseQueryString(q)["run"];
+            _selected = long.TryParse(wanted, out var id) ? _runs.FirstOrDefault(r => r.RunId == id) ?? _runs.FirstOrDefault() : _selected is null ? _runs.FirstOrDefault() : _runs.FirstOrDefault(r => r.RunId == _selected.RunId) ?? _runs.FirstOrDefault();
+            if (_owner)
+            {
+                var broken = await Store.VerifyChainAsync(CancellationToken.None);
+                _chain = broken is null ? "Hash chain verified: no record has been altered." : $"Hash chain broken at run {broken}.";
+            }
+            _error = null;
+        }
+        catch (Exception ex) { _error = "The audit log could not be read: " + ex.Message; }
+        _loaded = true;
+    }
+
+    private List<AuditRun> Visible => _runs.Where(r => _outcome == "" || Outcome(r) == _outcome).ToList();
+
+    private string Outcome(AuditRun r)
+    {
+        if (r.Status == "Blocked") return "Blocked";
+        if (r.Status == "Failed") return "Failed";
+        if (r.Status != "Answered") return "Other";
+        var certified = r.MetricId is { } id && _metrics.TryGetValue(id, out var m) && m.IsCertified;
+        return certified && !r.Findings.Contains("\"Failure\"") ? "Certified" : "Unverified";
+    }
+
+    private string RoleOf(AuditRun r) => r.UserName[(r.UserName.LastIndexOf('\\') + 1)..];
+
+    private static string Trim(string q) => q.Length > 90 ? q[..87] + "..." : q;
+    private static string Slug(string s) => System.Text.RegularExpressions.Regex.Replace(s.ToLowerInvariant(), "[^a-z0-9]+", "_").Trim('_');
+
+    private string ResultText(AuditRun r)
+    {
+        var rows = r.RowCount == 1 ? "One row." : $"{r.RowCount} rows.";
+        string[] msgs;
+        try { msgs = System.Text.Json.JsonDocument.Parse(r.Findings).RootElement.EnumerateArray().Select(e => e.GetProperty("Message").GetString() ?? "").Where(x => x.Length > 0).ToArray(); }
+        catch { msgs = []; }
+        return rows + (msgs.Length == 0 ? "" : " " + string.Join(" ", msgs));
+    }
+
+    private async Task ExportAsync()
+    {
+        static string Esc(string s) => "\"" + s.Replace("\"", "\"\"") + "\"";
+        var sb = new System.Text.StringBuilder("run_id,run_at_utc,user,outcome,status,rows,duration_ms,question,row_hash\n");
+        foreach (var r in Visible)
+            sb.AppendLine(string.Join(",", r.RunId, r.RunAtUtc.ToString("u"), Esc(r.UserName), Outcome(r), r.Status, r.RowCount, r.DurationMs, Esc(r.Question), r.RowHash));
+        await Js.InvokeVoidAsync("rbDownload", "audit-log.csv", sb.ToString());
+    }
+}

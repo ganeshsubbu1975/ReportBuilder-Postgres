@@ -1,0 +1,45 @@
+@page "/policies"
+@rendermode InteractiveServer
+@inject Microsoft.Extensions.Options.IOptions<PolicyOptions> Options
+@inject AuthenticationStateProvider Auth
+@inject UserContextFactory Users
+@inject PolicyGate Gate
+
+<PageTitle>Policies</PageTitle>
+
+<div class="page-head">
+    <div>
+        <h1>Policies</h1>
+        <p class="sub">The rules the policy gate enforces on every run. They are set by your administrators in configuration.</p>
+    </div>
+</div>
+
+<section class="card">
+    <h2>Your effective access</h2>
+    <div class="grid-3">
+        <div class="map-card"><div class="said">Companies</div><div class="term">@(_p.AllCompanies ? "All" : _p.Companies.Count == 0 ? "None" : string.Join(", ", _p.Companies.Order()))</div></div>
+        <div class="map-card"><div class="said">Views</div><div class="term">@(_p.AllViews ? "All reporting views" : _p.Views.Count == 0 ? "None" : string.Join(", ", _p.Views.Order()))</div></div>
+        <div class="map-card"><div class="said">Row limit</div><div class="term">@_p.MaxRows.ToString("N0")</div></div>
+    </div>
+</section>
+
+<section class="card">
+    <h2>Rules that always apply</h2>
+    <ul class="checks">
+        <li class="done"><span class="tick">✓</span>Reports run as you, read-only, on the reporting views only.</li>
+        <li class="done"><span class="tick">✓</span>SQL is compiled from reviewed catalog parts. The model writes no free-form SQL.</li>
+        <li class="done"><span class="tick">✓</span>Blocked columns are never returned: @(Options.Value.BlockedColumns.Length == 0 ? "none configured" : string.Join(", ", Options.Value.BlockedColumns)).</li>
+        <li class="done"><span class="tick">✓</span>@(Options.Value.AllowUnverified ? "Unverified metrics may be used, and the report is labeled Unverified." : "Only certified metrics can be used.")</li>
+        <li class="done"><span class="tick">✓</span>Every request is written to the hash-chained audit log. If it cannot be written, no result is released.</li>
+    </ul>
+</section>
+
+@code {
+    private EffectivePolicy _p = new(new HashSet<string>(), new HashSet<string>(), 0, false);
+
+    protected override async Task OnInitializedAsync()
+    {
+        var state = await Auth.GetAuthenticationStateAsync();
+        _p = Gate.Resolve(Users.From(state.User));
+    }
+}

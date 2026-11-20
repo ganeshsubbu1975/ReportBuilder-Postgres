@@ -1,0 +1,320 @@
+@page "/catalog/new"
+@page "/catalog/edit/{Id:int}"
+@rendermode InteractiveServer
+@inject ICatalogStore Store
+@inject IDraftPreview Preview
+@inject PolicyGate Gate
+@inject Microsoft.Extensions.Options.IOptions<PolicyOptions> Policy
+@inject AuthenticationStateProvider Auth
+@inject UserContextFactory Users
+
+<PageTitle>@(Editing ? "Edit metric" : "New metric")</PageTitle>
+
+<div class="page-head">
+    <div>
+        <h1>@(Editing ? "Edit metric" : "New metric")</h1>
+        @if (Editing)
+        {
+            <p class="sub">Change how this metric is described and drawn. Changing the view, measure or group-by columns sends it back to Unverified so it is reviewed again. Changing only the name, description, words or chart type keeps its current status.</p>
+        }
+        else
+        {
+            <p class="sub">Define a measure people can ask about. Everything is picked from the reporting views, no SQL is typed. It is saved as Unverified until a catalog owner certifies it.</p>
+        }
+    </div>
+    <a class="outline" href="catalog">Back to Certified metrics</a>
+</div>
+
+@if (!_loaded)
+{
+    <p class="muted">Loading...</p>
+}
+else if (!_isOwner)
+{
+    <p class="card">Only catalog owners can add metrics. Ask your administrator to add you to the catalog owners group.</p>
+}
+else if (_error is not null)
+{
+    <p class="card sev-failure">@_error</p>
+}
+else
+{
+    <div class="two-col">
+        <section class="card form">
+            <h2>1. Describe it</h2>
+            <label class="field"><span>Name</span><input @bind="_req.Name" @bind:event="oninput" maxlength="100" placeholder="For example: Discounted sales value" /></label>
+            <label class="field"><span>What it means</span><textarea rows="3" @bind="_req.Description" @bind:event="oninput" maxlength="400" placeholder="One or two sentences a reviewer can check against the business definition."></textarea></label>
+
+            <h2>2. Choose the data</h2>
+            <label class="field"><span>Reporting view</span>
+                <select value="@_req.View" disabled="@_locked" @onchange="OnViewChanged">
+                    <option value="">Select a view...</option>
+                    @foreach (var v in _schema.Keys.Order()) { <option value="@v">rpt.@v</option> }
+                </select></label>
+
+            @if (Columns.Length > 0)
+            {
+                @if (_locked)
+                {
+                    <p class="muted">This metric's SQL was not built on this screen, so the view and measure are fixed. You can still change its name, description, words, chart type@(_dimsEditable ? ", and group-by columns" : "; its group-by columns are fixed too because its SQL is not in the standard shape").</p>
+                }
+                <div class="field-row">
+                    <label class="field"><span>Combine values with</span>
+                        <select disabled="@_locked" @bind="_req.Aggregate" @bind:after="OnAggregateChanged">
+                            @foreach (var a in MetricBuilder.Aggregates) { <option value="@a">@AggLabel(a)</option> }
+                        </select></label>
+                    <label class="field"><span>Column to measure</span>
+                        <select disabled="@_locked" @bind="_req.MeasureColumn">
+                            @if (_req.Aggregate == "COUNT") { <option value="">All rows</option> } else { <option value="">Select a column...</option> }
+                            @foreach (var c in MeasureColumns) { <option value="@c.Name">@c.Name (@c.DataType)</option> }
+                        </select></label>
+                </div>
+                @if (_req.Aggregate is "SUM" or "AVG" or "MIN" or "MAX" && _req.MeasureColumn.Length > 0)
+                {
+                    @for (var i = 0; i < _req.ExtraMeasureColumns.Count; i++)
+                    {
+                        var idx = i;
+                        <div class="field-row">
+                            <label class="field"><span>@(idx == 0 ? "Combine with" : "and")</span>
+                                <select disabled="@_locked" value="@_req.MeasureOperator" @onchange="SetOperator">
+                                    <option value="*">multiplied by (x)</option><option value="+">plus (+)</option><option value="-">minus (-)</option>
+                                </select></label>
+                            <label class="field"><span>Column</span>
+                                <select disabled="@_locked" value="@_req.ExtraMeasureColumns[idx]" @onchange="e => SetExtra(idx, e.Value?.ToString())">
+                                    <option value="">Select a column...</option>
+                                    @foreach (var c in MeasureColumns.Where(c => !c.Name.Equals(_req.MeasureColumn, StringComparison.OrdinalIgnoreCase))) { <option value="@c.Name">@c.Name (@c.DataType)</option> }
+                                </select></label>
+                            <button type="button" disabled="@_locked" @onclick="() => _req.ExtraMeasureColumns.RemoveAt(idx)">Remove</button>
+                        </div>
+                    }
+                    @if (_req.ExtraMeasureColumns.Count < 4)
+                    {
+                        <button type="button" disabled="@_locked" @onclick="AddExtra">+ Add another column to the measure</button>
+                    }
+                }
+
+                <div class="field"><span>Group by (optional, up to 5)</span>
+                    <div class="check-grid">
+                        @foreach (var c in GroupColumns)
+                        {
+                            <label class="check"><input type="checkbox" disabled="@(!_dimsEditable)" checked="@_req.Dimensions.Contains(c.Name)" @onchange="e => ToggleDim(c.Name, (bool)(e.Value ?? false))" />@c.Name</label>
+                        }
+                    </div>
+                </div>
+
+                <h2>3. Show it</h2>
+                <label class="field"><span>Chart type for reports on this metric</span>
+                    <select @bind="_req.ChartType">
+                        @foreach (var t in MetricBuilder.ChartTypes) { <option value="@t">@ChartLabel(t)</option> }
+                    </select></label>
+                <p class="muted">Reports built from this metric are drawn with this chart. If the data cannot be drawn that way (a pie of negative values, say), the report falls back to Automatic.</p>
+
+                <h2>4. Help people find it</h2>
+                <label class="field"><span>Other words people use (comma separated)</span>
+                    <textarea rows="2" @bind="_req.Synonyms" placeholder="discounted items, markdown, below list price"></textarea></label>
+            }
+
+            <div class="form-actions">
+                <label class="select-pill"><span>Preview for company</span>
+                    <select @bind="_company">@foreach (var c in _companies) { <option>@c</option> }</select></label>
+                <button disabled="@(_busy || _req.View == "")" @onclick="PreviewAsync">Preview</button>
+                @if (Editing)
+                {
+                    <button class="primary" disabled="@(_busy || _req.View == "")" @onclick="SaveEditAsync">Save changes</button>
+                }
+                else
+                {
+                    <button class="primary" disabled="@(_busy || _req.View == "")" @onclick="CreateAsync">Create as unverified</button>
+                }
+            </div>
+        </section>
+
+        <div class="right-col">
+            @if (_issues.Count > 0)
+            {
+                <section class="card">
+                    <h2>Fix these first</h2>
+                    <ul class="findings">@foreach (var i in _issues) { <li class="sev-failure">@i</li> }</ul>
+                </section>
+            }
+            @if (_built?.Entry is { } e)
+            {
+                <section class="card">
+                    <h2>What will be saved</h2>
+                    <div class="map-card"><div class="said">Measure</div><div class="term">@e.MeasureExpr</div></div>
+                    <p class="muted">Chart: @ChartLabel(e.ChartType)</p>
+                    <p class="muted">Group by: @(e.Dimensions.Length == 0 ? "nothing (one total)" : string.Join(", ", e.Dimensions)) · Words: @string.Join(", ", e.Synonyms)</p>
+                    <details open><summary>SQL (built from the choices, not typed)</summary><pre>@e.SqlTemplate</pre></details>
+                </section>
+            }
+            @if (_sample is { } s)
+            {
+                <section class="card">
+                    <h2>Preview for company @_company</h2>
+                    <p class="muted">@s.RowCount.ToString("N0") @(s.RowCount == 1 ? "row" : "rows") returned. First @s.SampleRows.Count shown.</p>
+                    <div class="scroll">
+                        <table>
+                            <thead><tr>@foreach (var c in s.Columns) { <th>@c</th> }</tr></thead>
+                            <tbody>@foreach (var row in s.SampleRows) { <tr>@foreach (var cell in row) { <td>@cell</td> } </tr>}</tbody>
+                        </table>
+                    </div>
+                </section>
+            }
+            @if (_message is not null)
+            {
+                <section class="card"><p class="@(_created ? "pos" : "")">@_message</p>@if (_created) { <a class="outline link-btn" href="catalog">@(Editing ? "Back to Certified metrics" : "Review it on Certified metrics")</a> }</section>
+            }
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public int? Id { get; set; }
+    private bool Editing => Id.HasValue;
+    private bool _locked;
+    private bool _dimsEditable = true;
+    private MetricEntry? _existing;
+    private bool _loaded, _isOwner, _busy, _created;
+    private string? _error, _message;
+    private string _company = "";
+    private string _user = "";
+    private string[] _companies = [];
+    private readonly MetricRequest _req = new();
+    private IReadOnlyDictionary<string, ViewColumn[]> _schema = new Dictionary<string, ViewColumn[]>();
+    private List<string> _issues = new();
+    private MetricBuildResult? _built;
+    private DraftPreview? _sample;
+
+    private ViewColumn[] Columns => _schema.TryGetValue(_req.View, out var c) ? c : [];
+    private bool Allowed(ViewColumn c) => !c.Name.Equals("company_code", StringComparison.OrdinalIgnoreCase) && !Policy.Value.BlockedColumns.Contains(c.Name, StringComparer.OrdinalIgnoreCase);
+    private IEnumerable<ViewColumn> MeasureColumns => Columns.Where(c => Allowed(c) && (_req.Aggregate is not ("SUM" or "AVG") || MetricBuilder.IsNumeric(c.DataType)));
+    private IEnumerable<ViewColumn> GroupColumns => Columns.Where(c => Allowed(c) && !c.Name.Equals(_req.MeasureColumn, StringComparison.OrdinalIgnoreCase) && !_req.ExtraMeasureColumns.Contains(c.Name));
+
+    private static string ChartLabel(string t) => t switch
+    {
+        "auto" => "Automatic (pick from the data)", "bar" => "Bar chart (horizontal bars)", "column" => "Column chart (vertical bars)",
+        "line" => "Line chart", "pie" => "Pie chart", _ => t
+    };
+
+    private static string AggLabel(string a) => a switch
+    {
+        "SUM" => "Sum (add up)", "AVG" => "Average", "MIN" => "Minimum", "MAX" => "Maximum", "COUNT" => "Count rows", "COUNT DISTINCT" => "Count different values", _ => a
+    };
+
+    protected override async Task OnInitializedAsync()
+    {
+        var state = await Auth.GetAuthenticationStateAsync();
+        var user = Users.From(state.User);
+        _user = user.UserName;
+        var policy = Gate.Resolve(user);
+        _isOwner = policy.CatalogOwner;
+        if (_isOwner)
+        {
+            try
+            {
+                _schema = await Store.GetViewSchemaAsync(CancellationToken.None);
+                _companies = Gate.VisibleCompanies(policy).ToArray();
+                _company = _companies.FirstOrDefault() ?? "";
+                if (Id is { } id) await LoadExistingAsync(id);
+            }
+            catch (Exception ex) { _error = "The reporting views could not be read: " + ex.Message; }
+        }
+        _loaded = true;
+    }
+
+    private async Task LoadExistingAsync(int id)
+    {
+        _existing = await Store.GetMetricAsync(id, CancellationToken.None);
+        if (_existing is null) { _error = $"Metric {id} was not found."; return; }
+        var (req, editable) = MetricBuilder.ToRequest(_existing, _schema, Policy.Value.BlockedColumns);
+        _req.Name = req.Name; _req.Description = req.Description; _req.View = req.View; _req.Aggregate = req.Aggregate;
+        _req.MeasureColumn = req.MeasureColumn; _req.ExtraMeasureColumns = req.ExtraMeasureColumns; _req.MeasureOperator = req.MeasureOperator; _req.Dimensions = req.Dimensions; _req.Synonyms = req.Synonyms; _req.ChartType = req.ChartType;
+        _locked = !editable;
+        _dimsEditable = editable || MetricBuilder.CanEditDimensions(_existing);
+    }
+
+    private void OnViewChanged(ChangeEventArgs e)
+    {
+        _req.View = e.Value?.ToString() ?? "";
+        _req.MeasureColumn = ""; _req.ExtraMeasureColumns.Clear(); _req.Dimensions.Clear();
+        Reset();
+    }
+
+    private void SetOperator(ChangeEventArgs e) => _req.MeasureOperator = e.Value?.ToString() ?? "*";
+    private void SetExtra(int i, string? v) => _req.ExtraMeasureColumns[i] = v ?? "";
+    private void AddExtra() => _req.ExtraMeasureColumns.Add("");
+
+    private void OnAggregateChanged()
+    {
+        if (_req.MeasureColumn.Length > 0 && !MeasureColumns.Any(c => c.Name == _req.MeasureColumn)) _req.MeasureColumn = "";
+        if (_req.Aggregate is "COUNT" or "COUNT DISTINCT") _req.ExtraMeasureColumns.Clear();
+    }
+
+    private void ToggleDim(string name, bool on)
+    {
+        if (on && !_req.Dimensions.Contains(name)) _req.Dimensions.Add(name);
+        if (!on) _req.Dimensions.Remove(name);
+    }
+
+    private void Reset() { _issues = new(); _built = null; _sample = null; _message = null; _created = false; }
+
+    private MetricBuildResult Build()
+    {
+        _message = null; _sample = null; _created = false;
+        _built = _locked && _existing is not null ? MetricBuilder.ApplyEdit(_existing, _req, _schema, Policy.Value.BlockedColumns) : MetricBuilder.Build(_req, _schema, Policy.Value.BlockedColumns, _user);
+        _issues = _built.Issues.ToList();
+        return _built;
+    }
+
+    private async Task PreviewAsync()
+    {
+        _busy = true;
+        try
+        {
+            var r = Build();
+            if (!r.Ok) return;
+            try { _sample = await Preview.PreviewAsync(r.PreviewSql, _company, CancellationToken.None); }
+            catch (Exception ex) { _issues = new() { "The preview query failed: " + ex.Message }; }
+        }
+        finally { _busy = false; }
+    }
+
+    private async Task SaveEditAsync()
+    {
+        _busy = true;
+        try
+        {
+            var r = Build();
+            if (!r.Ok || _existing is null) return;
+            var e = r.Entry!;
+            e.MetricId = _existing.MetricId;
+            var changed = (e.ViewName != _existing.ViewName || e.SqlTemplate != _existing.SqlTemplate
+                || !e.Dimensions.Order().SequenceEqual(_existing.Dimensions.Order()));
+            await Store.UpdateMetricAsync(e, changed, CancellationToken.None);
+            _existing = await Store.GetMetricAsync(e.MetricId, CancellationToken.None) ?? _existing;
+            _created = true;
+            _message = changed && _existing.ReviewStatus == "UNVERIFIED"
+                ? $"\"{e.Name}\" was saved. Its definition changed, so it is Unverified again until a catalog owner reviews it."
+                : $"\"{e.Name}\" was saved.";
+        }
+        catch (Exception ex) { _created = false; _message = "The metric could not be saved: " + ex.Message; }
+        finally { _busy = false; }
+    }
+
+    private async Task CreateAsync()
+    {
+        _busy = true;
+        try
+        {
+            var r = Build();
+            if (!r.Ok) return;
+            var n = await Store.InsertUnverifiedAsync([r.Entry!], CancellationToken.None);
+            _created = n > 0;
+            _message = n > 0
+                ? $"\"{r.Entry!.Name}\" was added as Unverified. A catalog owner can now review and certify it."
+                : "A metric with the same view, measure and group-by columns already exists, so nothing was added.";
+        }
+        catch (Exception ex) { _message = "The metric could not be saved: " + ex.Message; }
+        finally { _busy = false; }
+    }
+}

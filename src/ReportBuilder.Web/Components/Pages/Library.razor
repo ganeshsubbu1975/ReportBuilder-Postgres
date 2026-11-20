@@ -1,0 +1,38 @@
+@page "/library"
+@rendermode InteractiveServer
+@inject ReportLibrary Reports
+@inject AuthenticationStateProvider Auth
+@inject UserContextFactory Users
+
+<PageTitle>Report library</PageTitle>
+
+<div class="page-head">
+    <div>
+        <h1>Report library</h1>
+        <p class="sub">Reports you saved. They are kept for this server session and are not written to the database.</p>
+    </div>
+</div>
+
+@if (_items.Count == 0)
+{
+    <section class="card empty"><p>No saved reports yet.</p><a class="outline link-btn" href="">Build a report</a></section>
+}
+else
+{
+    <div class="grid-3">
+        @foreach (var i in _items)
+        {
+            <a class="sample" href="report/@i.Id"><span class="cat">@UiText.When(i.SavedAtUtc) · @(i.Response.Label.Length == 0 ? "Report" : i.Response.Label)</span><span class="txt">@i.Title</span></a>
+        }
+    </div>
+}
+
+@code {
+    private IReadOnlyList<SavedReport> _items = Array.Empty<SavedReport>();
+
+    protected override async Task OnInitializedAsync()
+    {
+        var state = await Auth.GetAuthenticationStateAsync();
+        _items = Reports.For(Users.From(state.User).UserName);
+    }
+}

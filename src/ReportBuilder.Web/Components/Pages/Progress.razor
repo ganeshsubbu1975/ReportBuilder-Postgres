@@ -1,0 +1,88 @@
+@page "/progress"
+@rendermode InteractiveServer
+@implements IDisposable
+@inject ReportSession Session
+@inject NavigationManager Nav
+
+<PageTitle>Building your report</PageTitle>
+
+@if (!Session.Started)
+{
+    <div class="page-head"><div><h1>Nothing is running</h1><p class="sub">Start a report from <a href="">New report</a>.</p></div></div>
+}
+else
+{
+    <div class="page-head">
+        <h1>@(Session.Running ? "Building your report" : "Build finished")</h1>
+        @if (Session.Running) { <button class="outline" @onclick="Session.Cancel">Cancel</button> }
+    </div>
+    <div class="card question-bar">@Session.Question</div>
+
+    <div class="two-col">
+        <section class="card stages">
+            @foreach (var s in Session.Stages)
+            {
+                <div class="stage">
+                    <span class="mark @s.State">
+                        @if (s.State == "done") { <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5 9-10"/></svg> }
+                        else if (s.State == "failed") { <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg> }
+                        else if (s.State == "running") { <i></i> }
+                    </span>
+                    <div class="stage-body">
+                        <div class="stage-top"><span class="stage-title">@s.Title</span><span class="state @s.State">@s.StateLabel</span></div>
+                        <div class="stage-desc">@Describe(s)</div>
+                    </div>
+                </div>
+            }
+        </section>
+
+        <div class="right-col">
+            <section class="card">
+                <div class="spec-head"><strong>Report spec</strong><span class="muted">What the planner produced. SQL is compiled from this.</span></div>
+                <pre class="spec">@(Session.Spec ?? "The planner has not produced a spec yet.")</pre>
+            </section>
+            <section class="card">
+                <strong>Policy gate</strong>
+                <ul class="checks">
+                    @foreach (var c in Checks)
+                    {
+                        <li class="@PolicyState"><span class="tick">@(PolicyState == "done" ? "✓" : PolicyState == "failed" ? "✕" : "○")</span>@c</li>
+                    }
+                </ul>
+                @if (Session.PolicyFailure is not null) { <p class="sev-failure">@Session.PolicyFailure</p> }
+            </section>
+        </div>
+    </div>
+}
+
+@code {
+    private static readonly string[] Checks =
+    {
+        "Runs as you, not as a shared service account.",
+        "Read-only. No schema or data changes are possible.",
+        "Only objects on the allow list are touched.",
+        "Row limit and cost estimate are within budget.",
+        "Masked columns stay masked in the result."
+    };
+
+    private string PolicyState { get { var st = Session.Stages.First(s => s.Key == "policy").State; return st is "done" or "failed" ? st : "pending"; } }
+
+    protected override void OnInitialized()
+    {
+        Session.Changed += OnChanged;
+        Route();
+    }
+
+    private static string Describe(StageView s) => s.State == "done" ? s.DoneDescription : s.Description;
+
+    private void OnChanged() => InvokeAsync(() => { Route(); StateHasChanged(); });
+
+    private void Route()
+    {
+        if (!Session.Started || Session.Running) return;
+        if (Session.Cancelled || Session.Response is null || Session.NeedsAttention) Nav.NavigateTo("");
+        else Nav.NavigateTo("report");
+    }
+
+    public void Dispose() => Session.Changed -= OnChanged;
+}

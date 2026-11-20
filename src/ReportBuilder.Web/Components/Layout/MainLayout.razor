@@ -1,0 +1,66 @@
+@inherits LayoutComponentBase
+@implements IDisposable
+@inject NavigationManager Nav
+@inject ReportSession Session
+@inject AuthenticationStateProvider Auth
+@inject UserContextFactory Users
+@inject PolicyGate Gate
+@inject Microsoft.Extensions.Options.IOptions<PolicyOptions> Policy
+
+<div class="shell">
+    <aside class="side">
+        <div class="brand"><span class="logo"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><path d="M7 17v-4M12 17V8M17 17v-6"/></svg></span>Report Builder</div>
+
+        <div class="nav-group">Build</div>
+        <a class="nav-item @Active("", "ask")" href="">New report</a>
+        <a class="nav-item @Active("progress")" href="progress">In progress@(Session.Running ? " •" : "")</a>
+        <a class="nav-item @Active("library", "report")" href="library">Report library</a>
+        <a class="nav-item @Active("scheduled")" href="scheduled">Scheduled</a>
+
+        <div class="nav-group">Govern</div>
+        <a class="nav-item @Active("catalog")" href="catalog">Certified metrics</a>
+        <a class="nav-item @Active("views")" href="views">Views</a>
+        <a class="nav-item @Active("audit")" href="audit">Audit trail</a>
+        <a class="nav-item @Active("policies")" href="policies">Policies</a>
+
+        <div class="access">
+            <strong>Your access</strong>
+            <span>@_access</span>
+        </div>
+    </aside>
+    <main class="content">
+        @Body
+    </main>
+</div>
+
+@code {
+    private string _access = "";
+
+    protected override async Task OnInitializedAsync()
+    {
+        Nav.LocationChanged += OnLocation;
+        Session.Changed += OnSession;
+        var state = await Auth.GetAuthenticationStateAsync();
+        var p = Gate.Resolve(Users.From(state.User));
+        var o = Policy.Value;
+        var companies = p.AllCompanies ? "All companies." : p.Companies.Count == 0 ? "No company access." : (p.Companies.Count == 1 ? "Company " : "Companies ") + string.Join(", ", p.Companies.Order()) + ".";
+        var masked = o.BlockedColumns.Length == 0 ? "" : " " + string.Join(", ", o.BlockedColumns.Select(c => c.Replace('_', ' '))) + " columns are masked.";
+        _access = companies + masked;
+    }
+
+    private string Active(params string[] roots)
+    {
+        var path = Nav.ToBaseRelativePath(Nav.Uri).Split('?', '#')[0].Trim('/').ToLowerInvariant();
+        var first = path.Split('/')[0];
+        return roots.Contains(first) ? "active" : "";
+    }
+
+    private void OnLocation(object? sender, Microsoft.AspNetCore.Components.Routing.LocationChangedEventArgs e) => InvokeAsync(StateHasChanged);
+    private void OnSession() => InvokeAsync(StateHasChanged);
+
+    public void Dispose()
+    {
+        Nav.LocationChanged -= OnLocation;
+        Session.Changed -= OnSession;
+    }
+}

@@ -1,0 +1,148 @@
+@page "/"
+@rendermode InteractiveServer
+@implements IDisposable
+@inject ReportSession Session
+@inject NavigationManager Nav
+@inject AuthenticationStateProvider Auth
+@inject UserContextFactory Users
+
+<PageTitle>New report</PageTitle>
+
+<div class="page-head">
+    <div>
+        <h1>What do you want to see?</h1>
+        <p class="sub">Describe the report in plain language. It runs with your own ERP permissions.</p>
+    </div>
+    <div class="pills"><span class="pill">@_role</span><span class="pill">Read-only</span></div>
+</div>
+
+<section class="card ask-card">
+    <textarea @bind="_question" @bind:event="oninput" rows="4" maxlength="1000" placeholder="For example: Show aging of overdue customer invoices by region for company 1000, as of today, and flag accounts over 90 days."></textarea>
+    <div class="ask-row">
+        <label class="select-pill"><span>Module:</span>
+            <select @bind="_module">
+                <option>Auto</option><option>Finance, AR</option><option>Finance, AP</option><option>Inventory</option><option>Procurement</option>
+            </select></label>
+        <label class="select-pill"><span>Period:</span>
+            <select @bind="_period">
+                <option>As of today</option><option>Last closed month</option><option>Year to date</option><option>Last year</option>
+            </select></label>
+        <label class="select-pill"><span>Output:</span>
+            <select @bind="_output">
+                <option>Table and chart</option><option>Table only</option>
+            </select></label>
+        <button class="primary big" disabled="@(string.IsNullOrWhiteSpace(_question) || Session.Running)" @onclick="() => BuildAsync(_question, true)">Build report</button>
+    </div>
+</section>
+
+@if (Session.Response is { } r && Session.NeedsAttention)
+{
+    <section class="card">
+        <div class="agent-head"><span class="tag">Intent agent</span><span class="agent-title">@Title(r)</span></div>
+        <p class="lead">@r.Answer</p>
+
+        @if (r.Clarifications.Length > 0)
+        {
+            <div class="options">
+                @foreach (var option in r.Clarifications)
+                {
+                    <button class="option @(_picked == option ? "picked" : "")" @onclick="() => ClarifyAsync(option)">@option</button>
+                }
+            </div>
+        }
+
+        @if (r.Findings.Count > 0)
+        {
+            <ul class="findings">
+                @foreach (var f in r.Findings)
+                {
+                    <li class="sev-@f.Severity.ToString().ToLowerInvariant()">@f.Message</li>
+                }
+            </ul>
+        }
+
+        @if (r.Mappings.Count > 0)
+        {
+            <hr />
+            <div class="eyebrow">How your words map to governed terms</div>
+            <div class="grid-4">
+                @foreach (var m in r.Mappings)
+                {
+                    <div class="map-card"><div class="said">You said: "@m.Said"</div><div class="term">@m.Term</div><code>@m.Code</code></div>
+                }
+            </div>
+        }
+        @if (r.RunId > 0) { <p class="muted">Audit run @r.RunId</p> }
+    </section>
+}
+
+<div class="eyebrow top-gap">Try one of these</div>
+<div class="grid-3">
+    @foreach (var s in Samples)
+    {
+        <button class="sample" @onclick="() => _question = s.Text"><span class="cat">@s.Category</span><span class="txt">@s.Text</span></button>
+    }
+</div>
+
+@code {
+    private static readonly (string Category, string Text)[] Samples =
+    {
+        ("Inventory", "Items below reorder point by plant, with open purchase orders"),
+        ("Procurement", "Purchase orders past their delivery date, grouped by vendor"),
+        ("Finance", "Revenue against budget by cost center for the last closed month")
+    };
+
+    private string _question = "";
+    private string _module = "Auto", _period = "As of today", _output = "Table and chart";
+    private string? _picked;
+    private string _role = "";
+    private UserContext _user = new();
+    private string _baseQuestion = "";
+
+    protected override async Task OnInitializedAsync()
+    {
+        var state = await Auth.GetAuthenticationStateAsync();
+        _user = Users.From(state.User);
+        _role = UiText.RoleLabel(_user.Roles);
+        _question = Session.Question;
+        _output = Session.Output;
+        _baseQuestion = Session.Question;
+        Session.Changed += OnChanged;
+    }
+
+    private void OnChanged() => InvokeAsync(StateHasChanged);
+    public void Dispose() => Session.Changed -= OnChanged;
+
+    private static string Title(AskResponse r) => r.Status switch
+    {
+        AskStatus.NeedsClarification => "One detail before I build this",
+        AskStatus.Blocked => "This report was blocked",
+        AskStatus.Unsupported => "This report is not available",
+        _ => "This report could not be built"
+    };
+
+    private Task ClarifyAsync(string option)
+    {
+        _picked = option;
+        return BuildAsync(_baseQuestion + " (" + option + ")", false);
+    }
+
+    private Task BuildAsync(string question, bool fresh)
+    {
+        if (string.IsNullOrWhiteSpace(question) || Session.Running) return Task.CompletedTask;
+        if (fresh)
+        {
+            _baseQuestion = question.Trim();
+            _picked = null;
+        }
+        var q = question.Trim();
+        var hints = new List<string>();
+        if (fresh && _module != "Auto") hints.Add("Module: " + _module);
+        if (fresh && _period != "As of today") hints.Add("Period: " + _period);
+        if (hints.Count > 0) q += " (" + string.Join(". ", hints) + ")";
+        Session.Output = _output;
+        Session.Start(q, _user);
+        Nav.NavigateTo("progress");
+        return Task.CompletedTask;
+    }
+}

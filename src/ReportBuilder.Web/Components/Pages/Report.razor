@@ -1,0 +1,518 @@
+@page "/report"
+@page "/report/{Id:guid}"
+@rendermode InteractiveServer
+@inject ReportSession Session
+@inject ReportLibrary Library
+@inject NavigationManager Nav
+@inject IJSRuntime Js
+@inject AuthenticationStateProvider Auth
+@inject UserContextFactory Users
+
+<PageTitle>@(_title.Length > 0 ? _title : "Report")</PageTitle>
+
+@if (_resp is null)
+{
+    <div class="page-head"><div><h1>No report to show</h1><p class="sub">Build one from <a href="">New report</a> or open one from the <a href="library">Report library</a>.</p></div></div>
+}
+else
+{
+    <div class="page-head">
+        <div>
+            <h1>@_title</h1>
+            <div class="pills left">
+                @if (_resp.Label == "Certified") { <span class="pill good">✓ Certified metrics</span> }
+                else if (_resp.Label.Length > 0) { <span class="pill warn">@_resp.Label</span> }
+                <span class="pill">As of @_resp.RanAtUtc.ToLocalTime().ToString("d MMM yyyy")</span>
+                @if (_resp.CompanyCode is not null) { <span class="pill">Company @_resp.CompanyCode</span> }
+                @if (_view?.ScaleNote is { Length: > 0 } note) { <span class="pill">@note</span> }
+            </div>
+        </div>
+        <div class="actions">
+            <button class="outline" disabled="@(_view is null)" @onclick="ExportAsync">Export CSV</button>
+            <button class="outline" disabled="@(_view is null)" @onclick="ExportPdfAsync">Export PDF</button>
+            <button class="outline" @onclick="SchedulePressed">Schedule</button>
+            <button class="primary" disabled="@_saved" @onclick="Save">@(_saved ? "Saved" : "Save to library")</button>
+        </div>
+    </div>
+    @if (_note is not null) { <p class="muted note">@_note</p> }
+
+    @if (_view is not null && _resp.Status == AskStatus.Answered && _kpis.Count > 0)
+    {
+        <div class="grid-4 kpis">
+            @foreach (var k in _kpis)
+            {
+                <div class="card kpi"><div class="kpi-label">@k.Label</div><div class="kpi-value @k.Tone">@k.Value</div><div class="kpi-sub">@k.Sub</div></div>
+            }
+        </div>
+    }
+
+    <section class="card">
+        <div class="agent-head"><span class="tag">Presentation agent</span><span class="agent-title">Summary</span></div>
+        <p class="lead">@_resp.Answer</p>
+        @if (Caveats.Count > 0)
+        {
+            <div class="eyebrow">Caveats</div>
+            @foreach (var c in Caveats) { <p class="caveat">@c</p> }
+        }
+    </section>
+
+    @if (Kind == "line" && _line is { } tr)
+    {
+        var all = tr.Series.SelectMany(x => x.Values).Where(v => v.HasValue).Select(v => v!.Value).ToList();
+        var (lo, hi, step) = ReportView.NiceAxis(all.Min(), all.Max());
+        const double W = 820, H = 320, L = 64, R = 28, T = 20, B = 48;
+        var n = tr.XLabels.Count;
+        double X(int i) => L + (W - L - R) * i / (n - 1);
+        double Y(decimal v) => T + (H - T - B) * (1.0 - (double)((v - lo) / (hi - lo)));
+        string F(double d) => d.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture);
+        var every = (int)Math.Ceiling(n / 10.0);
+        var years = _view.TimeCols.Where(c => _view.Result.Columns[c].Contains("year", StringComparison.OrdinalIgnoreCase))
+            .SelectMany(c => _view.Result.Rows.Select(r => ReportView.Text(r[c]))).Distinct().OrderBy(x => x).ToList();
+        var peak = all.Max();
+        <section class="card trend-card">
+            <div class="chart-head">
+                <div>
+                    <strong class="rank-title">@(_resp!.MetricName ?? "Result")@(_trend is not null ? " over time" : " by " + _view!.Header(_view.LabelCols[0]).ToLowerInvariant())</strong>
+                    <div class="muted">@(_trend is null ? "In the order shown" : years.Count > 0 ? (years.Count == 1 ? "Fiscal year " + years[0] : "Fiscal years " + years[0] + " to " + years[^1]) : "By period")@(_view.ScaleNote.Length > 0 ? " · " + _view.ScaleNote.ToLowerInvariant() : "")</div>
+                </div>
+                @if (tr.Series.Count > 1)
+                {
+                    <div class="legend">@foreach (var sr in tr.Series) { <span><i class="sw" style="background:@sr.Color"></i>@sr.Name</span> }</div>
+                }
+            </div>
+            <svg class="trend" viewBox="0 0 @F(W) @F(H)" role="img" aria-label="Line chart of @(_resp.MetricName) over time">
+                <defs>
+                    <linearGradient id="trendfill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1d4ed8" stop-opacity=".24" /><stop offset="1" stop-color="#1d4ed8" stop-opacity="0" /></linearGradient>
+                </defs>
+                @for (var tv = lo; tv <= hi; tv += step)
+                {
+                    <line x1="@F(L)" x2="@F(W - R)" y1="@F(Y(tv))" y2="@F(Y(tv))" class="@(tv == 0 ? "axis-zero" : "grid")" />
+                    @Svg(F(L - 10), F(Y(tv) + 4), "tick", "end", ReportView.Compact(tv))
+                }
+                @for (var i = 0; i < n; i += every)
+                {
+                    @Svg(F(X(i)), F(H - B + 22), "tick", "middle", tr.XLabels[i])
+                }
+                @if (tr.Series.Count == 1)
+                {
+                    var pts = tr.Series[0].Values.Select((v, i) => (v, i)).Where(p => p.v.HasValue).ToList();
+                    var baseY = F(Y(lo > 0m ? lo : 0m));
+                    if (pts.Count > 1)
+                    {
+                        var area = "M " + F(X(pts[0].i)) + " " + baseY + " " + string.Join(" ", pts.Select(p => "L " + F(X(p.i)) + " " + F(Y(p.v!.Value)))) + " L " + F(X(pts[^1].i)) + " " + baseY + " Z";
+                        <path d="@area" fill="url(#trendfill)" />
+                    }
+                }
+                @foreach (var sr in tr.Series)
+                {
+                    var line = sr.Values.Select((v, i) => (v, i)).Where(p => p.v.HasValue).ToList();
+                    var d = "M " + string.Join(" L ", line.Select(p => F(X(p.i)) + " " + F(Y(p.v!.Value))));
+                    <path d="@d" fill="none" stroke="@sr.Color" stroke-width="2.75" stroke-linejoin="round" stroke-linecap="round" />
+                    @foreach (var p in line)
+                    {
+                        var isPeak = tr.Series.Count == 1 && p.v == peak;
+                        <circle cx="@F(X(p.i))" cy="@F(Y(p.v!.Value))" r="@(isPeak ? "6" : "3.75")" fill="@(isPeak ? sr.Color : "#fff")" stroke="@sr.Color" stroke-width="2.25"><title>@(tr.Series.Count > 1 ? sr.Name + " · " : "")@tr.XLabels[p.i]: @_view.Fmt(p.v!.Value)</title></circle>
+                    }
+                }
+                @if (tr.Series.Count == 1)
+                {
+                    var series = tr.Series[0].Values.Select((v, i) => (v, i)).Where(p => p.v.HasValue).ToList();
+                    var last = series[^1];
+                    var top = series.First(p => p.v == peak);
+                    <g class="callout"><rect x="@F(X(last.i) - 40)" y="@F(Y(last.v!.Value) - 34)" width="80" height="22" rx="6" />@Svg(F(X(last.i)), F(Y(last.v!.Value) - 19), "", "middle", ReportView.Compact(last.v!.Value))</g>
+                    @if (top.i != last.i)
+                    {
+                        <g class="callout peak"><rect x="@F(X(top.i) - 48)" y="@F(Y(top.v!.Value) - 34)" width="96" height="22" rx="6" />@Svg(F(X(top.i)), F(Y(top.v!.Value) - 19), "", "middle", "Peak " + ReportView.Compact(top.v!.Value))</g>
+                    }
+                }
+            </svg>
+            @if (years.Count > 0 && years.Count < 6 && (_resp.MetricName ?? "").Contains("revenue", StringComparison.OrdinalIgnoreCase))
+            {
+                <p class="muted trend-note">The report covers the past 6 fiscal years, but the ledger only holds @(years.Count == 1 ? "fiscal year " + years[0] : years.Count + " fiscal years (" + years[0] + " to " + years[^1] + ")"). Earlier years will appear when that data is loaded.</p>
+            }
+        </section>
+    }
+
+    @if (Kind == "ranked")
+    {
+        var ranked = Ranked;
+        var signed = _view.IsSigned;
+        var grand = ranked.Sum(r => r.Value);
+        var basis = signed ? ranked.Sum(r => Math.Abs(r.Value)) : grand;
+        var top = ranked.Count == 0 ? 0m : ranked.Max(r => Math.Abs(r.Value));
+        <section class="card rank-card">
+            <div class="rank-head">
+                <div>
+                    <strong class="rank-title">@(_resp!.MetricName ?? "Result") by @_view.Header(_view.ShortLabelCols[0]).ToLowerInvariant()</strong>
+                    <div class="muted">@(signed ? "Gains to the right of zero, losses to the left" : "Ranked highest to lowest")@(ranked.Any(r => r.IsOther) ? ", top " + (ranked.Count - 1) + " shown" : "") · @_view.Header(_view.StackCols[0])</div>
+                </div>
+                <div class="rank-total"><span class="muted">@(signed ? "Net result" : "Total")</span><strong class="@(signed ? (grand < 0 ? "neg" : "pos") : "")">@_view.Fmt(grand)</strong></div>
+            </div>
+            @for (var i = 0; i < ranked.Count; i++)
+            {
+                var r = ranked[i];
+                var w = top <= 0 ? 0m : Math.Abs(r.Value) / top * 100m;
+                w = Math.Max(w, 0.8m);
+                var share = basis <= 0 ? 0m : Math.Abs(r.Value) / basis * 100m;
+                var width = w.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+                <div class="rank-row @(i == 0 && !r.IsOther && !signed ? "lead-row" : "")" title="@r.Label: @_view.Fmt(r.Value) (@share.ToString("0.0")% of total)">
+                    <span class="rank-no">@(r.IsOther ? "" : (i + 1).ToString())</span>
+                    <span class="rank-label">@r.Label</span>
+                    @if (signed)
+                    {
+                        <div class="rank-track div">
+                            <span class="half left">@if (r.Value < 0) { <span class="rank-bar neg" style="width:@(width)%"></span> }</span>
+                            <span class="half right">@if (r.Value >= 0) { <span class="rank-bar pos" style="width:@(width)%"></span> }</span>
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="rank-track"><span class="rank-bar @(r.IsOther ? "other" : i == 0 ? "first" : i < 3 ? "top" : "")" style="width:@(width)%"></span></div>
+                    }
+                    <span class="rank-val @(signed ? (r.Value < 0 ? "neg" : "pos") : "")">@_view.Fmt(r.Value)</span>
+                    <span class="rank-share">@share.ToString("0.0")%</span>
+                </div>
+            }
+        </section>
+    }
+
+    @if (Kind == "stacked")
+    {
+        var maxRow = _view.Additive
+            ? _view.Result.Rows.Max(_view.RowTotal)
+            : _view.Result.Rows.SelectMany(r => _view.StackCols.Select(c => Math.Abs(ReportView.Num(r[c])))).DefaultIfEmpty(0m).Max();
+        <section class="card">
+            <div class="chart-head">
+                <strong>@ChartTitle</strong>
+                <div class="legend">
+                    @for (var i = 0; i < _view.StackCols.Count; i++)
+                    {
+                        <span><i class="sw s@(Series(i))"></i>@_view.Header(_view.StackCols[i])</span>
+                    }
+                </div>
+            </div>
+            @foreach (var row in _view.Result.Rows)
+            {
+                @if (_view.Additive)
+                {
+                    <div class="bar-row">
+                        <span class="bar-label" title="@_view.Label(row)">@_view.ChartLabel(row)</span>
+                        <div class="bar-track">
+                            @for (var i = 0; i < _view.StackCols.Count; i++)
+                            {
+                                var v = Math.Max(0m, ReportView.Num(row[_view.StackCols[i]]));
+                                var w = maxRow <= 0 ? 0m : v / maxRow * 100m;
+                                <span class="seg s@(Series(i))" style="width:@(w.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture))%" title="@_view.Header(_view.StackCols[i]): @_view.Fmt(v)"></span>
+                            }
+                        </div>
+                        <span class="bar-total">@_view.Fmt(_view.RowTotal(row))</span>
+                    </div>
+                }
+                else
+                {
+                    <div class="group-row">
+                        <span class="bar-label" title="@_view.Label(row)">@_view.ChartLabel(row)</span>
+                        <div class="group-bars">
+                            @for (var i = 0; i < _view.StackCols.Count; i++)
+                            {
+                                var raw = ReportView.Num(row[_view.StackCols[i]]);
+                                var w = maxRow <= 0 ? 0m : Math.Abs(raw) / maxRow * 100m;
+                                if (raw != 0m && w < 0.6m) { w = 0.6m; }
+                                <div class="group-line" title="@_view.Header(_view.StackCols[i])">
+                                    <span class="seg s@(Series(i))" style="width:@(w.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture))%"></span>
+                                    <span class="group-val">@raw.ToString("N2", System.Globalization.CultureInfo.InvariantCulture)</span>
+                                </div>
+                            }
+                        </div>
+                    </div>
+                }
+            }
+        </section>
+    }
+
+    @if (Kind == "column")
+    {
+        var rows = _view!.Result.Rows.Take(30).ToList();
+        var cols = _view.StackCols;
+        var stacked = _view.Additive && cols.Count > 1;
+        decimal Pos(object?[] r, int c) => Math.Max(0m, ReportView.Num(r[c]));
+        var vals = (stacked ? rows.Select(r => cols.Sum(c => Pos(r, c))) : rows.SelectMany(r => cols.Select(c => ReportView.Num(r[c])))).ToList();
+        var (lo, hi, step) = ReportView.NiceAxis(vals.DefaultIfEmpty(0m).Min(), vals.DefaultIfEmpty(0m).Max());
+        const double W = 820, H = 320, L = 64, R = 28, T = 20, B = 56;
+        var slot = (W - L - R) / rows.Count;
+        var groupW = slot * 0.7;
+        var barW = stacked ? groupW : groupW / cols.Count;
+        double Y(decimal v) => T + (H - T - B) * (1.0 - (double)((v - lo) / (hi - lo)));
+        string F(double d) => d.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture);
+        var every = (int)Math.Ceiling(rows.Count / 12.0);
+        <section class="card trend-card">
+            <div class="chart-head">
+                <div>
+                    <strong class="rank-title">@ChartTitle</strong>
+                    <div class="muted">@(rows.Count < _view.Result.Rows.Count ? "First " + rows.Count + " rows shown" : "In the order shown")@(_view.ScaleNote.Length > 0 ? " · " + _view.ScaleNote.ToLowerInvariant() : "")</div>
+                </div>
+                @if (cols.Count > 1)
+                {
+                    <div class="legend">@for (var i = 0; i < cols.Count; i++) { <span><i class="sw s@(Series(i))"></i>@_view.Header(cols[i])</span> }</div>
+                }
+            </div>
+            <svg class="trend" viewBox="0 0 @F(W) @F(H)" role="img" aria-label="Column chart of @(_resp!.MetricName)">
+                @for (var tv = lo; tv <= hi; tv += step)
+                {
+                    <line x1="@F(L)" x2="@F(W - R)" y1="@F(Y(tv))" y2="@F(Y(tv))" class="@(tv == 0 ? "axis-zero" : "grid")" />
+                    @Svg(F(L - 10), F(Y(tv) + 4), "tick", "end", ReportView.Compact(tv))
+                }
+                @for (var i = 0; i < rows.Count; i++)
+                {
+                    var gx = L + slot * i + (slot - groupW) / 2;
+                    var label = _view.ChartLabel(rows[i]);
+                    if (i % every == 0) { @Svg(F(L + slot * i + slot / 2), F(H - B + 22), "tick", "middle", label.Length > 14 ? label[..13] + "…" : label) }
+                    decimal run = 0m;
+                    for (var s = 0; s < cols.Count; s++)
+                    {
+                        var v = ReportView.Num(rows[i][cols[s]]);
+                        double top, bottom, x;
+                        if (stacked) { var p = Pos(rows[i], cols[s]); top = Y(run + p); bottom = Y(run); run += p; x = gx; }
+                        else { top = Y(Math.Max(v, 0m)); bottom = Y(Math.Min(v, 0m)); x = gx + barW * s; }
+                        <rect x="@F(x)" y="@F(top)" width="@F(Math.Max(barW - 2, 1))" height="@F(Math.Max(bottom - top, v == 0m ? 0 : 1))" rx="2" style="fill:var(--s@(cols.Count == 1 ? 2 : Series(s)))"><title>@label · @_view.Header(cols[s]): @_view.Fmt(v)</title></rect>
+                    }
+                }
+            </svg>
+        </section>
+    }
+
+    @if (Kind == "pie")
+    {
+        var slices = Ranked;
+        var sum = slices.Sum(r => r.Value);
+        const double CX = 150, CY = 150, RO = 140, RI = 80;
+        string F(double d) => d.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+        (double X, double Y) Pt(double rad, double a) => (CX + rad * Math.Cos(a), CY + rad * Math.Sin(a));
+        var start = -Math.PI / 2;
+        <section class="card">
+            <div class="chart-head">
+                <div>
+                    <strong class="rank-title">@(_resp!.MetricName ?? "Result") by @_view!.Header(_view.ShortLabelCols[0]).ToLowerInvariant()</strong>
+                    <div class="muted">Share of total@(slices.Any(r => r.IsOther) ? ", top " + (slices.Count - 1) + " shown" : "") · @_view.Header(_view.StackCols[0])</div>
+                </div>
+                <div class="rank-total"><span class="muted">Total</span><strong>@_view.Fmt(sum)</strong></div>
+            </div>
+            <div class="pie-wrap">
+                <svg viewBox="0 0 300 300" class="pie" role="img" aria-label="Pie chart of @(_resp.MetricName)">
+                    @for (var i = 0; i < slices.Count; i++)
+                    {
+                        var frac = (double)(slices[i].Value / sum);
+                        if (frac <= 0) continue;
+                        var color = slices[i].IsOther ? "#98a2b3" : PieColors[i % PieColors.Length];
+                        if (frac >= 0.9999)
+                        {
+                            <path d="M @F(CX - RO) @F(CY) A @F(RO) @F(RO) 0 1 1 @F(CX + RO) @F(CY) A @F(RO) @F(RO) 0 1 1 @F(CX - RO) @F(CY) M @F(CX - RI) @F(CY) A @F(RI) @F(RI) 0 1 0 @F(CX + RI) @F(CY) A @F(RI) @F(RI) 0 1 0 @F(CX - RI) @F(CY) Z" fill="@color" fill-rule="evenodd"><title>@slices[i].Label: @_view.Fmt(slices[i].Value) (100%)</title></path>
+                        }
+                        else
+                        {
+                            var end = start + frac * 2 * Math.PI;
+                            var (x1, y1) = Pt(RO, start); var (x2, y2) = Pt(RO, end);
+                            var (x3, y3) = Pt(RI, end); var (x4, y4) = Pt(RI, start);
+                            var large = frac > 0.5 ? 1 : 0;
+                            <path d="M @F(x1) @F(y1) A @F(RO) @F(RO) 0 @large 1 @F(x2) @F(y2) L @F(x3) @F(y3) A @F(RI) @F(RI) 0 @large 0 @F(x4) @F(y4) Z" fill="@color" stroke="#fff" stroke-width="1.5"><title>@slices[i].Label: @_view.Fmt(slices[i].Value) (@((frac * 100).ToString("0.0"))%)</title></path>
+                            start = end;
+                        }
+                    }
+                </svg>
+                <div class="pie-legend">
+                    @for (var i = 0; i < slices.Count; i++)
+                    {
+                        <div class="pie-row"><i class="sw" style="background:@(slices[i].IsOther ? "#98a2b3" : PieColors[i % PieColors.Length])"></i><span class="pie-label">@slices[i].Label</span><span class="rank-val">@_view.Fmt(slices[i].Value)</span><span class="rank-share">@((sum <= 0 ? 0m : slices[i].Value / sum * 100m).ToString("0.0"))%</span></div>
+                    }
+                </div>
+            </div>
+        </section>
+    }
+
+    @if (_resp.Result is { Rows.Count: > 0 } res)
+    {
+        <section class="card">
+            <div class="chart-head"><strong>Detail</strong>@if (_view!.Additive && _view.LabelCols.Count > 0 && res.Rows.Count > 1) { <span class="muted">Totals are summed across all rows shown</span> }</div>
+            <div class="scroll">
+                <table class="detail">
+                    <thead>
+                        <tr>
+                            @foreach (var c in _view!.LabelCols) { <th>@_view.Header(c)</th> }
+                            @foreach (var c in _view.StackCols) { <th class="num @(c == _view.HighlightCol ? "hl" : "")">@_view.Header(c)</th> }
+                            @if (_view.ShowTotal) { <th class="num">Total</th> }
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var row in res.Rows)
+                        {
+                            <tr>
+                                @foreach (var c in _view.LabelCols) { <td class="@(_view.LongTextCols.Contains(c) ? "wrap" : "strong")">@ReportView.Text(row[c])</td> }
+                                @foreach (var c in _view.StackCols) { <td class="num @(c == _view.HighlightCol ? "hl" : "")">@_view.Fmt(ReportView.Num(row[c]))</td> }
+                                @if (_view.ShowTotal) { <td class="num strong">@_view.Fmt(_view.RowTotal(row))</td> }
+                            </tr>
+                        }
+                        @if (_view.Additive && res.Rows.Count > 1 && _view.NumCols.Count > 0)
+                        {
+                            <tr class="sum">
+                                @for (var i = 0; i < _view.LabelCols.Count; i++) { <td class="strong">@(i == 0 ? "All rows" : "")</td> }
+                                @foreach (var c in _view.StackCols) { <td class="num @(c == _view.HighlightCol ? "hl" : "")">@_view.Fmt(_view.ColTotal(c))</td> }
+                                @if (_view.ShowTotal) { <td class="num">@_view.Fmt(_view.GrandTotal)</td> }
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+            @if (res.Truncated) { <p class="muted">Showing the first rows only.</p> }
+        </section>
+    }
+
+    <section class="card trust">
+        <h2>Why you can trust this</h2>
+        @foreach (var t in Trust)
+        {
+            <div class="trust-item"><span class="tick @t.State">@(t.State == "ok" ? "✓" : "!")</span><div><div class="trust-title">@t.Title</div><div class="trust-text">@t.Text</div></div></div>
+        }
+        <a class="outline link-btn" href="audit@(_resp.RunId > 0 ? "?run=" + _resp.RunId : "")">View audit trail</a>
+    </section>
+}
+
+@code {
+    [Parameter] public Guid? Id { get; set; }
+
+    private sealed record TrustItem(string State, string Title, string Text);
+
+    private AskResponse? _resp;
+    private ReportView? _view;
+    private ReportView.TrendModel? _trend, _line;
+    private List<Kpi> _kpis = new();
+    private string _title = "";
+    private string _question = "";
+    private bool _saved, _showChart = true;
+    private string? _note;
+    private UserContext _user = new();
+    private Guid? _savedId;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        var state = await Auth.GetAuthenticationStateAsync();
+        _user = Users.From(state.User);
+        if (Id is { } id)
+        {
+            var item = Library.Get(_user.UserName, id);
+            _resp = item?.Response; _question = item?.Question ?? ""; _title = item?.Title ?? "";
+            _saved = item is not null; _savedId = item?.Id;
+        }
+        else
+        {
+            _resp = Session.Response; _question = Session.Question;
+            _showChart = Session.Output != "Table only";
+            _title = _resp?.MetricName is { Length: > 0 } m ? Titled(m) : Trim(_question);
+        }
+        if (_resp?.Result is { } r)
+        {
+            _view = new ReportView(r, _resp.Status != AskStatus.Reconciled);
+            _trend = _view.Trend();
+            _line = _trend ?? _view.CategoryLine();
+            _kpis = _resp.Status == AskStatus.Answered ? _view.Kpis(_resp.Findings, _resp.ControlAreas) : new();
+        }
+    }
+
+    private string Titled(string metric)
+    {
+        var dims = _resp!.Mappings.Where(m => m.Code.StartsWith("dim.")).Select(m => m.Term).ToArray();
+        return dims.Length == 0 ? metric : metric + " by " + string.Join(", ", dims);
+    }
+
+    private static string Trim(string q) => q.Length > 80 ? q[..77] + "..." : q;
+
+    private string ChartTitle => _view is { } v && v.StackCols.Count > 1 ? (_resp!.MetricName ?? "Result") + " by " + string.Join(" and ", v.LabelCols.Select(c => v.Header(c).ToLowerInvariant())) : (_resp!.MetricName ?? "Result");
+
+    private static MarkupString Svg(string x, string y, string cls, string anchor, string text) =>
+        new($"<text x=\"{x}\" y=\"{y}\" class=\"{cls}\" text-anchor=\"{anchor}\">{System.Net.WebUtility.HtmlEncode(text)}</text>");
+
+    private bool SingleSeries => _view is { Additive: true } v && v.StackCols.Count == 1 && v.ShortLabelCols.Count >= 1 && v.Result.Rows.Count >= 2;
+
+    private sealed record RankedRow(string Label, decimal Value, bool IsOther);
+
+    /// <summary>Highest first. More than 10 rows collapse into one "Other" row so the chart stays readable.</summary>
+    private List<RankedRow> Ranked
+    {
+        get
+        {
+            var v = _view!;
+            var all = v.Result.Rows.Select(r => new RankedRow(v.ChartLabel(r), ReportView.Num(r[v.StackCols[0]]), false))
+                .OrderByDescending(r => r.Value).ToList();
+            if (all.Count <= 10) return all;
+            var rest = all.Skip(9).ToList();
+            return all.Take(9).Append(new RankedRow($"Other ({rest.Count} more)", rest.Sum(r => r.Value), true)).ToList();
+        }
+    }
+
+    private static readonly string[] PieColors = { "#1d4ed8", "#0f7a55", "#c2570c", "#7c3aed", "#be185d", "#0891b2", "#ca8a04", "#4d7c0f", "#475569" };
+
+    private bool PieOk => _view is { Additive: true } && SingleSeries && Ranked is { } r && r.All(x => x.Value >= 0m) && r.Sum(x => x.Value) > 0m;
+
+    /// <summary>Which chart to draw. The metric's chart type wins when the data can be drawn that way, otherwise the shape of the result decides.</summary>
+    private string Kind
+    {
+        get
+        {
+            if (_view is null || !_showChart || !_view.CanChart) return "none";
+            var bars = SingleSeries ? "ranked" : "stacked";
+            return (_resp?.ChartType ?? "auto") switch
+            {
+                "line" when _line is not null => "line",
+                "bar" => bars,
+                "column" => "column",
+                "pie" when PieOk => "pie",
+                _ => _trend is not null ? "line" : bars
+            };
+        }
+    }
+
+    private static int Series(int i) => Math.Min(i, 3);
+
+    private List<string> Caveats => _resp!.Findings.Where(f => f.Severity != Severity.Failure && f.Code != "control_ok").Select(f => f.Message)
+        .Concat(_resp.Findings.Where(f => f.Severity == Severity.Failure).Select(f => f.Message)).ToList();
+
+    private List<TrustItem> Trust
+    {
+        get
+        {
+            var r = _resp!;
+            var items = new List<TrustItem>();
+            if (r.ControlAreas.Length == 0) items.Add(new("ok", "No ledger control", "This metric has no general ledger control account defined."));
+            else if (r.Findings.Any(f => f.Code == "control_break")) items.Add(new("warn", "Does not tie to the ledger", r.Findings.First(f => f.Code == "control_break").Message));
+            else if (r.Findings.Any(f => f.Code == "control_ok")) items.Add(new("ok", "Ties to the ledger", "Totals match the " + string.Join(", ", r.ControlAreas) + " control account in the general ledger. Difference 0.00."));
+            else items.Add(new("warn", "Ledger check not available", "No control total could be read for " + string.Join(", ", r.ControlAreas) + "."));
+            items.Add(r.Label == "Certified"
+                ? new("ok", "Certified definitions", $"Uses {r.MetricName}, approved by the catalog owners.")
+                : new("warn", "Definitions not certified", $"{r.MetricName ?? "This metric"} is not certified, or a check failed, so the report is labeled {(r.Label.Length == 0 ? "unverified" : r.Label)}."));
+            items.Add(new("ok", "Ran as you", $"Your company code{(r.CompanyCode is null ? "" : " (" + r.CompanyCode + ")")} restrictions were applied. Restricted columns stay masked."));
+            items.Add(new("ok", "Fresh data", $"Read from the reporting views when you asked, at {r.RanAtUtc.ToLocalTime():HH:mm}."));
+            return items;
+        }
+    }
+
+    private async Task ExportAsync()
+    {
+        if (_view is null) return;
+        await Js.InvokeVoidAsync("rbDownload", "report.csv", _view.Csv());
+    }
+
+    private async Task ExportPdfAsync()
+    {
+        if (_view is null) return;
+        await Js.InvokeVoidAsync("rbPrint", _title.Length > 0 ? _title : "Report");
+    }
+
+    private void SchedulePressed() => _note = "Scheduling is not available yet. Save the report to the library and re-run it when needed.";
+
+    private void Save()
+    {
+        if (_resp is null || _saved) return;
+        var item = Library.Save(_user.UserName, _title, _question, _resp);
+        _saved = true; _savedId = item.Id;
+        _note = "Saved to the report library for this server session.";
+    }
+}

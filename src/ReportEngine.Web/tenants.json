@@ -1,0 +1,41 @@
+{
+  "VansalesConnection": "Server = 192.168.100.53; Port = 5432; Database = TICVansales_Sync; User Id = rb_reader; Password = CHANGE_ME; Pooling = false;CommandTimeout=300;",
+  "ConsoleConnection": "Server = 192.168.100.53; Port = 5432; Database = ThomsunGroupConsoleUAT1; User Id = rb_reader; Password = CHANGE_ME; Pooling = false;CommandTimeout=300;",
+  "Tenants": [
+    {
+      "Name": "ThomsunInfoCare",
+      "BaseCompany": "Thomsun",
+      "Host": "CAP",
+      "ConnectionString": "Server = 192.168.100.53; Port = 5432; Database = ChefDB-QA; User Id = rb_reader; Password = CHANGE_ME; Pooling = false;CommandTimeout=300;",
+      "ReportConnection": "Server = 192.168.100.53; Port = 5432; Database = ChefDB-QA; User Id = rb_reader; Password = CHANGE_ME; Pooling = false;CommandTimeout=300;"
+    },
+    {
+      "Name": "The Print House",
+      "BaseCompany": "Thomsun",
+      "Host": "TPH",
+      "ConnectionString": "Server = 192.168.100.53; Port = 5432; Database = ThePrintHouse; User Id = rb_reader; Password = CHANGE_ME; Pooling = false;CommandTimeout=300;",
+      "ReportConnection": "Server = 192.168.100.53; Port = 5432; Database = ThePrintHouse; User Id = rb_reader; Password = CHANGE_ME; Pooling = false;CommandTimeout=300;"
+    },
+    {
+      "Name": "Thomsun Foods LLC",
+      "BaseCompany": "Thomsun",
+      "Host": "TF",
+      "ConnectionString": "Server = 192.168.100.53; Port = 5432; Database = ThomsunFoodLLCUAT; User Id = rb_reader; Password = CHANGE_ME; Pooling = false;CommandTimeout=300;",
+      "ReportConnection": "Server = 192.168.100.53; Port = 5432; Database = ThomsunFoodLLCUAT; User Id = rb_reader; Password = CHANGE_ME; Pooling = false;CommandTimeout=300;"
+    },
+    {
+      "Name": "Thomsun Foods Service LLC",
+      "BaseCompany": "Thomsun",
+      "Host": "TFS",
+      "ConnectionString": "Server = 192.168.100.53; Port = 5432; Database = ThomsunFoodServiceLLC_UAT; User Id = rb_reader; Password = CHANGE_ME; Pooling = false;CommandTimeout=300;",
+      "ReportConnection": "Server = 192.168.100.53; Port = 5432; Database = ThomsunFoodServiceLLC_UAT; User Id = rb_reader; Password = CHANGE_ME; Pooling = false;CommandTimeout=300;"
+    },
+    {
+      "Name": "Thomsun General Trading Main",
+      "BaseCompany": "Thomsun",
+      "Host": "TGTM",
+      "ConnectionString": "Server = 192.168.100.53; Port = 5432; Database = ThomsunGeneralTradingMain_UAT; User Id = rb_reader; Password = CHANGE_ME; Pooling = false;CommandTimeout=300;",
+      "ReportConnection": "Server = 192.168.100.53; Port = 5432; Database = ThomsunGeneralTradingMain_UAT; User Id = rb_reader; Password = CHANGE_ME; Pooling = false;CommandTimeout=300;"
+    }
+  ]
+}

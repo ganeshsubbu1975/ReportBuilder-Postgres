@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TERO ERP — AI Report Engine</title>
+  <link rel="stylesheet" href="app.css?v=4" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <!-- TERO ERP Login Screen -->
+  <main id="loginView" class="tero-login-page">
+    <div class="tero-login-shell">
+      <div class="tero-login-hero">
+        <div class="tero-brand-mark">
+          <span class="tero-t">T</span>
+          <span class="tero-e"><i></i><i></i><i></i></span>
+          <span class="tero-r">R</span>
+          <span class="tero-o"><svg viewBox="0 0 24 24" width="16" height="16"><polygon points="6,5 19,11 10,19 9,12" fill="#334155"/></svg></span>
+          <span class="tero-erp-tag">ERP</span>
+        </div>
+        <div class="hero-eyebrow">THOMSUN INFOCARE</div>
+        <h1 class="hero-title">Total ERP for<br/>Reliable<br/>Operations</h1>
+        <p class="hero-sub">A distraction-free AI reporting workspace with balanced contrast, DB-driven RBAC security, and deterministic SQL generation.</p>
+        <div class="hero-stats">
+          <div class="stat-card"><strong>99.95%</strong><span>Uptime</span></div>
+          <div class="stat-card"><strong>8+</strong><span>Modules</span></div>
+          <div class="stat-card"><strong>24/7</strong><span>Operations</span></div>
+        </div>
+      </div>
+
+      <section class="tero-login-card">
+        <div class="login-logo-banner">
+          <div class="tero-brand-mark small">
+            <span class="tero-t">T</span>
+            <span class="tero-e"><i></i><i></i><i></i></span>
+            <span class="tero-r">R</span>
+            <span class="tero-o"><svg viewBox="0 0 24 24" width="13" height="13"><polygon points="6,5 19,11 10,19 9,12" fill="#334155"/></svg></span>
+            <span class="tero-erp-tag">ERP</span>
+          </div>
+        </div>
+
+        <h2 class="login-heading">Welcome back</h2>
+        <p class="muted">Sign in to continue to your ERP reporting workspace</p>
+
+        <div id="uatSwitcherBox" class="field-group hidden">
+          <label for="uatUserSelect">Quick UAT User</label>
+          <select id="uatUserSelect"></select>
+        </div>
+
+        <div class="field-group">
+          <label for="loginUsername">Username</label>
+          <input id="loginUsername" type="text" placeholder="Enter ERP username" />
+        </div>
+
+        <div id="passwordBox" class="field-group">
+          <label for="loginPassword">Password</label>
+          <div class="password-wrap">
+            <input id="loginPassword" type="password" placeholder="Optional in UAT mode" />
+            <button id="togglePwdBtn" type="button" class="pwd-show-btn">Show</button>
+          </div>
+        </div>
+
+        <div class="login-meta-row">
+          <label class="remember-lbl"><input type="checkbox" checked /> Remember me</label>
+          <span class="tero-link">DB RBAC Enabled</span>
+        </div>
+
+        <div id="loginError" class="alert alert-error hidden"></div>
+        <button id="loginBtn" class="btn btn-tero btn-full">Sign In</button>
+
+        <div class="powered-by">
+          <span>POWERED BY</span>
+          <strong>THOMSUN <em>INFOCARE</em></strong>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <!-- TERO ERP Workspace Shell -->
+  <div id="workspaceView" class="tero-shell hidden">
+    <!-- Left Dark Navy Sidebar -->
+    <aside class="tero-sidebar">
+      <div class="sidebar-brand">
+        <div class="tero-brand-mark sidebar-mark">
+          <span class="tero-t">T</span>
+          <span class="tero-e light"><i></i><i></i><i></i></span>
+          <span class="tero-r">R</span>
+          <span class="tero-o"><svg viewBox="0 0 24 24" width="11" height="11"><polygon points="6,5 19,11 10,19 9,12" fill="#e2e8f0"/></svg></span>
+          <span class="tero-erp-tag light">ERP</span>
+        </div>
+      </div>
+
+      <div class="sidebar-search">
+        <input id="menuSearch" type="text" placeholder="Search In Menu" />
+      </div>
+
+      <nav id="sidebarNav" class="sidebar-nav"></nav>
+
+      <div class="sidebar-footer">
+        <button id="adminBtn" class="nav-item hidden" type="button">RBAC Administration</button>
+      </div>
+    </aside>
+
+    <!-- Right Main Area -->
+    <div class="tero-main">
+      <!-- Top Dark Navy Bar -->
+      <header class="tero-topbar">
+        <div class="breadcrumb" id="breadcrumb">Home &nbsp;|&nbsp; Reports &nbsp;|&nbsp; AI Report Engine</div>
+        <div class="topbar-right">
+          <div class="top-select-wrap">
+            <label for="periodSelect">Period</label>
+            <select id="periodSelect">
+              <option value="all">All Time</option>
+              <option value="last_3_quarters">Last 3 Quarters</option>
+              <option value="last_2_quarters">Last 2 Quarters</option>
+              <option value="last_1_quarter">Last Quarter</option>
+              <option value="last_6_months">Last 6 Months</option>
+              <option value="last_30_days">Last 30 Days</option>
+              <option value="ytd">Year to Date</option>
+              <option value="last_year">Last Year</option>
+            </select>
+          </div>
+          <div id="companyBox" class="top-select-wrap">
+            <label for="companySelect">Company</label>
+            <select id="companySelect"></select>
+          </div>
+          <div class="user-chip">
+            <span id="userDisplay"></span>
+            <span id="userRolesPill" class="role-pill"></span>
+          </div>
+          <button id="switchUserBtn" class="btn-top">Switch</button>
+          <button id="logoutBtn" class="btn-top">Sign out</button>
+        </div>
+      </header>
+
+      <!-- Page Body -->
+      <div class="tero-content">
+        <div class="page-title-row">
+          <h1 id="pageHeading">AI Report Generator</h1>
+          <div class="quick-prompts">
+            <button class="chip" data-prompt="Pull the list of inventory sold maximum in last 3 quarters">Top inventory (3Q)</button>
+            <button class="chip" data-prompt="Show total credit sales by customer for last 3 quarters">Credit sales (3Q)</button>
+            <button class="chip" data-prompt="Give me reasons for difference between ledger and trial balance during reconciliation">GL vs TB Reconciliation</button>
+          </div>
+        </div>
+
+        <!-- AI Query Planner Card -->
+        <section class="tero-card">
+          <div class="card-head-inline">
+            <h2>AI Query Planner</h2>
+            <span class="muted">AI reads permitted schema metadata only — C# builds &amp; executes the SQL</span>
+          </div>
+          <div class="ai-row">
+            <textarea id="aiPrompt" rows="2" placeholder="Describe the report you want in plain English (e.g. Show total credit sales by customer for last 3 quarters)..."></textarea>
+            <div class="ai-btns">
+              <button id="aiConfigBtn" class="btn btn-outline-tero">Auto-Configure</button>
+              <button id="aiRunBtn" class="btn btn-tero">Ask &amp; Run</button>
+            </div>
+          </div>
+          <div id="aiNotice" class="alert hidden"></div>
+        </section>
+
+        <!-- Form-Style Configurator Card (Tero ERP Horizontal Form Layout) -->
+        <section class="tero-card">
+          <div class="card-head-inline">
+            <h2>Report Field &amp; Filter Configuration</h2>
+            <span id="viewDesc" class="muted"></span>
+          </div>
+
+          <div class="form-grid-top">
+            <div class="field-group">
+              <label for="areaSelect">ERP Area</label>
+              <select id="areaSelect"></select>
+            </div>
+            <div class="field-group">
+              <label for="viewSelect">Reporting View</label>
+              <select id="viewSelect"></select>
+            </div>
+            <div class="field-group">
+              <label for="sortColSelect">Sort By</label>
+              <select id="sortColSelect"><option value="">None</option></select>
+            </div>
+            <div class="field-group">
+              <label for="sortDirSelect">Order</label>
+              <select id="sortDirSelect">
+                <option value="DESC">Descending</option>
+                <option value="ASC">Ascending</option>
+              </select>
+            </div>
+            <div class="field-group">
+              <label for="limitInput">Row Limit</label>
+              <input id="limitInput" type="number" min="1" max="5000" value="200" />
+            </div>
+          </div>
+
+          <div class="form-grid-bottom">
+            <div class="field-group">
+              <div class="row-between">
+                <label>Fields to Include</label>
+                <button id="selectDefaultFieldsBtn" class="btn-link" type="button">Reset Defaults</button>
+              </div>
+              <div id="fieldsChecklist" class="checklist-grid"></div>
+            </div>
+
+            <div class="builders-col">
+              <div class="field-group">
+                <div class="row-between">
+                  <label>Aggregations (SUM / COUNT / AVG)</label>
+                  <button id="addAggBtn" class="btn-link" type="button">+ Add Aggregation</button>
+                </div>
+                <div id="aggList" class="stack"></div>
+              </div>
+
+              <div class="field-group">
+                <div class="row-between">
+                  <label>Filters</label>
+                  <button id="addFilterBtn" class="btn-link" type="button">+ Add Filter</button>
+                </div>
+                <div id="filterList" class="stack"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="form-actions">
+            <button id="runReportBtn" class="btn btn-tero">Generate Report</button>
+          </div>
+        </section>
+
+        <!-- Full-Width Results Card -->
+        <section class="tero-card results-card">
+          <div class="results-head">
+            <div>
+              <h2 id="resultTitle">Report Output</h2>
+              <div id="resultMeta" class="muted">Select fields above or use the AI Query Planner, then click Generate Report.</div>
+            </div>
+            <div class="export-bar">
+              <button class="btn btn-toolbar export-btn" data-fmt="xlsx" disabled>Excel (.xlsx)</button>
+              <button class="btn btn-toolbar export-btn" data-fmt="pdf" disabled>PDF</button>
+              <button class="btn btn-toolbar export-btn" data-fmt="csv" disabled>CSV</button>
+              <button class="btn btn-toolbar export-btn" data-fmt="json" disabled>JSON</button>
+            </div>
+          </div>
+
+          <div id="reconcileBox" class="reconcile-box hidden"></div>
+
+          <div id="viewToggle" class="tero-tabs hidden">
+            <button class="tab active" data-tab="table">Line Details</button>
+            <button class="tab" data-tab="chart">Chart View</button>
+            <button class="tab" data-tab="sql">Compiled SQL &amp; Audit</button>
+            <input id="tableSearch" class="table-search" type="search" placeholder="Search rows..." />
+          </div>
+
+          <div id="tableTab" class="tab-content">
+            <div class="table-wrap">
+              <table id="resultTable">
+                <thead></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div id="chartTab" class="tab-content hidden">
+            <div class="chart-controls">
+              <label>Chart Type:
+                <select id="chartTypeSelect">
+                  <option value="bar">Bar</option>
+                  <option value="line">Line</option>
+                  <option value="pie">Pie</option>
+                </select>
+              </label>
+              <label>Metric:
+                <select id="chartMetricSelect"></select>
+              </label>
+              <label class="log-chk"><input id="chartLogScale" type="checkbox" /> Log scale</label>
+            </div>
+            <div id="chartNote" class="muted" style="margin-bottom:6px;"></div>
+            <div class="chart-wrap"><canvas id="reportChart"></canvas></div>
+          </div>
+
+          <div id="sqlTab" class="tab-content hidden">
+            <pre id="sqlPreview" class="sql-box"></pre>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <!-- Admin RBAC Modal -->
+  <div id="adminModal" class="modal hidden">
+    <div class="modal-card">
+      <div class="row-between">
+        <h2>RBAC &amp; Module View Rules (cat.module_view_map)</h2>
+        <button id="closeAdminBtn" class="btn btn-outline-tero">Close</button>
+      </div>
+      <p class="muted">Configure exact <code>menuid</code> / <code>role_name</code> &rarr; <code>area_name</code> / <code>view_name</code> permissions.</p>
+      <div class="admin-form">
+        <input id="ruleRole" type="text" placeholder="Role Name (optional)" />
+        <input id="ruleMenuId" type="number" placeholder="MenuId (optional)" />
+        <input id="ruleArea" type="text" placeholder="Area Name" />
+        <input id="ruleView" type="text" placeholder="View Name (or *)" />
+        <input id="ruleBlocked" type="text" placeholder="Blocked cols (comma-sep)" />
+        <button id="saveRuleBtn" class="btn btn-tero">Add Rule</button>
+      </div>
+      <div class="table-wrap small-table">
+        <table id="rbacTable">
+          <thead><tr><th>ID</th><th>Role</th><th>MenuId</th><th>Area</th><th>View</th><th>Blocked Cols</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <h3 style="margin:8px 0 0;font-size:.95rem;">Pending AI-Suggested View Drafts</h3>
+      <div class="table-wrap small-table">
+        <table id="draftsTable">
+          <thead><tr><th>ID</th><th>View Name</th><th>Status</th><th>By</th><th>Description</th><th>Actions</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js?v=4"></script>
+</body>
+</html>

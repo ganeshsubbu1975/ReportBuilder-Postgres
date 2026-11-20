@@ -1,0 +1,165 @@
+@page "/catalog"
+@rendermode InteractiveServer
+@inject ICatalogStore Store
+@inject CatalogGenerator Generator
+@inject PolicyGate Gate
+@inject AuthenticationStateProvider Auth
+@inject UserContextFactory Users
+@inject IConfiguration Config
+
+<PageTitle>Certified metrics</PageTitle>
+<div class="page-head"><div><h1>Certified metrics</h1><p class="sub">Review generated catalog entries and certify the ones the business owner has checked.</p></div><a class="outline primary-link" href="catalog/new">+ New metric</a></div>
+
+@if (!_loaded)
+{
+    <p class="muted">Loading...</p>
+}
+else if (!_isOwner)
+{
+    <p class="card">Only catalog owners can review entries. Ask your administrator to add you to the catalog owners group.</p>
+}
+else
+{
+    <p class="muted">Generated entries arrive as <strong>Unverified</strong>. Approve an entry only after checking its SQL, its dimensions and its synonyms with the business owner.</p>
+
+    <section class="card">
+        <h2>Generate from test questions</h2>
+        <button class="primary" disabled="@_busy" @onclick="GenerateAsync">@(_busy ? "Working..." : "Run generator")</button>
+        @if (_report is not null)
+        {
+            <p>@_report.Passed of @_report.Scores.Count test questions behaved as expected. @(_candidates.Count) candidate entries are ready to load.</p>
+            <div class="scroll">
+                <table>
+                    <thead><tr><th>Id</th><th>Category</th><th>Status</th><th>Result</th><th>Note</th></tr></thead>
+                    <tbody>
+                        @foreach (var s in _report.Scores)
+                        {
+                            <tr><td>@s.Id</td><td>@s.Category</td><td>@s.Status</td><td class="@(s.Passed ? "ok" : "bad")">@(s.Passed ? "PASS" : "FAIL")</td><td>@s.Why</td></tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+            @if (_report.SynonymCollisions.Count > 0)
+            {
+                <p class="muted">Terms that map to more than one view (they will trigger a clarifying question): @string.Join("; ", _report.SynonymCollisions.Select(c => c.Key + " -> " + string.Join("/", c.Value)))</p>
+            }
+            <button disabled="@(_busy || _candidates.Count == 0)" @onclick="LoadAsync">Load @_candidates.Count candidates as unverified</button>
+        }
+        @if (_message is not null)
+        {
+            <p class="muted">@_message</p>
+        }
+    </section>
+
+    <section class="card">
+        <h2>Entries</h2>
+        <label>Show
+            <select @bind="_filter">
+                <option value="">All</option>
+                <option value="UNVERIFIED">Unverified</option>
+                <option value="CERTIFIED">Certified</option>
+                <option value="REJECTED">Rejected</option>
+            </select>
+        </label>
+        @foreach (var m in Visible)
+        {
+            <div class="entry">
+                <div class="badges">
+                    <span class="badge status-@m.ReviewStatus.ToLowerInvariant()">@m.ReviewStatus</span>
+                    <strong>@m.Name</strong>
+                    <span class="muted">rpt.@m.ViewName &middot; @m.MeasureExpr</span>
+                    <a class="outline link-btn" href="catalog/edit/@m.MetricId">Edit</a>
+                </div>
+                <p>@m.Description</p>
+                <p class="muted">Group by: @string.Join(", ", m.Dimensions) &middot; Synonyms: @string.Join(", ", m.Synonyms) &middot; Control: @(m.ControlAreas.Length == 0 ? "none" : string.Join(", ", m.ControlAreas)) &middot; Chart: @m.ChartType</p>
+                @if (m.SourceQuestion is not null)
+                {
+                    <p class="muted">From the question: @m.SourceQuestion</p>
+                }
+                <details><summary>SQL</summary><pre>@m.SqlTemplate</pre></details>
+                @if (m.ReviewedBy is not null)
+                {
+                    <p class="muted">Reviewed by @m.ReviewedBy on @(m.ReviewedAt?.ToString("yyyy-MM-dd HH:mm")) UTC @(string.IsNullOrEmpty(m.ReviewNote) ? "" : "- " + m.ReviewNote)</p>
+                }
+                @if (m.ReviewStatus == "UNVERIFIED")
+                {
+                    <div class="review">
+                        <input placeholder="Review note (optional)" @bind="_notes[m.MetricId]" />
+                        <button class="primary" @onclick="() => ReviewAsync(m.MetricId, true)">Approve</button>
+                        <button @onclick="() => ReviewAsync(m.MetricId, false)">Reject</button>
+                    </div>
+                }
+            </div>
+        }
+        @if (!Visible.Any())
+        {
+            <p class="muted">No entries.</p>
+        }
+    </section>
+}
+
+@code {
+    private bool _loaded, _isOwner, _busy;
+    private string _filter = "";
+    private string? _message;
+    private string _reviewer = "";
+    private List<MetricEntry> _entries = new();
+    private GenerationReport? _report;
+    private List<MetricEntry> _candidates = new();
+    private readonly Dictionary<int, string> _notes = new();
+
+    private IEnumerable<MetricEntry> Visible => _entries.Where(e => _filter == "" || e.ReviewStatus == _filter);
+
+    protected override async Task OnInitializedAsync()
+    {
+        var state = await Auth.GetAuthenticationStateAsync();
+        var user = Users.From(state.User);
+        _reviewer = user.UserName;
+        _isOwner = Gate.Resolve(user).CatalogOwner;
+        if (_isOwner) await RefreshAsync();
+        _loaded = true;
+    }
+
+    private async Task RefreshAsync()
+    {
+        _entries = (await Store.GetMetricsAsync(CancellationToken.None)).ToList();
+        foreach (var e in _entries) _notes.TryAdd(e.MetricId, "");
+    }
+
+    private async Task GenerateAsync()
+    {
+        _busy = true; _message = null;
+        try
+        {
+            var path = Path.Combine(AppContext.BaseDirectory, Config["Catalog:QuestionsFile"] ?? "questions.json");
+            var questions = System.Text.Json.JsonSerializer.Deserialize<List<TestQuestion>>(await File.ReadAllTextAsync(path)) ?? new();
+            _report = await Generator.RunAsync(questions, CancellationToken.None);
+            _candidates = CatalogGenerator.ToEntries(_report);
+        }
+        catch (Exception ex) { _message = "Generation failed: " + ex.Message; }
+        finally { _busy = false; }
+    }
+
+    private async Task LoadAsync()
+    {
+        _busy = true;
+        try
+        {
+            var n = await Store.InsertUnverifiedAsync(_candidates, CancellationToken.None);
+            _message = $"Inserted {n} new entries as unverified. Entries that already existed were skipped.";
+            await RefreshAsync();
+        }
+        catch (Exception ex) { _message = "Load failed: " + ex.Message; }
+        finally { _busy = false; }
+    }
+
+    private async Task ReviewAsync(int id, bool approve)
+    {
+        try
+        {
+            await Store.SetReviewAsync(id, approve, _reviewer, _notes.GetValueOrDefault(id), CancellationToken.None);
+            await RefreshAsync();
+        }
+        catch (Exception ex) { _message = "Review failed: " + ex.Message; }
+    }
+}
