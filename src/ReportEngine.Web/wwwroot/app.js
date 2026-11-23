@@ -1341,7 +1341,7 @@ init();
     return;
   }
 
-  let rec = null, listening = false, base = "", finalText = "", heardSpeech = false;
+  let rec = null, listening = false, finalText = "", heardSpeech = false;
 
   const setListening = (on) => {
     listening = on;
@@ -1356,7 +1356,7 @@ init();
     rec.lang = navigator.language || "en-US";
     rec.interimResults = true;
     rec.continuous = false;
-    base = prompt.value.trim();
+    prompt.value = "";
     finalText = "";
     heardSpeech = false;
     status.textContent = "";
@@ -1369,7 +1369,7 @@ init();
         if (ev.results[i].isFinal) finalText += t; else interim += t;
       }
       heardSpeech = true;
-      prompt.value = [base, (finalText + interim).trim()].filter(Boolean).join(" ");
+      prompt.value = (finalText + interim).trim();
     };
     rec.onerror = (ev) => {
       const msgs = {
