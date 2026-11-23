@@ -62,6 +62,8 @@ public sealed class CompiledQuery
     public string ViewName { get; init; } = "";
     public string[] Columns { get; init; } = [];
     public bool HasOrderBy { get; init; }
+    /// <summary>ORDER BY columns (name, descending) so rows merged from several company databases can be re-sorted globally.</summary>
+    public List<(string Column, bool Desc)> OrderSpecs { get; init; } = [];
     public int CommandTimeoutSeconds { get; init; } = 30;
     public int FetchLimit { get; init; }   // 0 = not capped
 }

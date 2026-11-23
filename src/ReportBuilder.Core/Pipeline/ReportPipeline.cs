@@ -96,6 +96,15 @@ public sealed class ReportPipeline
         if (policy.Companies.Count == 0 || policy.Views.Count == 0)
             return Blocked(st, "no_role", "Your account has no access to any report data.");
 
+        var preCheck = ScopeGuardrail.InspectInput(question, _opts.BlockedColumns);
+        if (!preCheck.Allowed)
+        {
+            if (preCheck.Category == "SensitiveData")
+                return Blocked(st, "guardrail_sensitive", preCheck.Reason);
+            st.Findings.Add(new Finding($"guardrail_{preCheck.Category.ToLowerInvariant()}", Severity.Warning, preCheck.Reason));
+            return new AskResponse { Status = AskStatus.Unsupported, Answer = preCheck.Reason };
+        }
+
         // 1. intent
         st.Report("intent", "running");
         var intent = await _intent.ClassifyAsync(question, ct);

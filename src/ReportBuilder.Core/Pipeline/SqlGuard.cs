@@ -11,11 +11,17 @@ public sealed record GuardResult(bool Ok, IReadOnlyList<string> Issues, IReadOnl
 public static class SqlGuard
 {
     private static readonly Regex Forbidden = new(
-        @"\b(insert|update|delete|drop|alter|create|truncate|merge|exec|execute|grant|revoke|into|copy|call|do|vacuum|pg_\w+|lo_\w+|dblink\w*|set_config|current_setting)\b",
+        @"\b(insert|update|delete|drop|alter|create|truncate|merge|exec|execute|grant|revoke|into|copy|call|do|vacuum|union|intersect|except|pg_\w+|lo_\w+|dblink\w*|set_config|current_setting)\b",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex RptRef = new(@"\brpt\s*\.\s*(\w+)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex BaseSchemaRef = new(
-        @"\b(org|fin|inv|mfg|ar|ap|sal|pur|hr|cfg|cat|audit|common|public|pg_catalog|information_schema)\s*\.\s*\w+",
+        @"\b(org|fin|inv|mfg|ar|ap|sal|pur|hr|cfg|cat|audit|common|public|finance|sales|trading|hrms|dbo|sys|pg_catalog|information_schema|pg_toast|pg_temp)\s*\.\s*\w+",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex SqlKeywordFromExpr = new(
+        @"\b(?:extract|trim|substring)\s*\([^()]*\bfrom\b[^()]*\)",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex FromJoinTarget = new(
+        @"\b(?:from|join)\s+(?:(\()|(rpt\s*\.\s*[A-Za-z_][A-Za-z0-9_]*)|([^\s,;()]+))",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex Param = new(@"(?<!@)@(\w+)", RegexOptions.Compiled);
 
@@ -37,9 +43,29 @@ public static class SqlGuard
         foreach (var v in views)
             if (!knownViews.Contains(v)) issues.Add($"unknown view rpt.{v}");
 
+        // Strip string literals and SQL function expressions containing FROM (EXTRACT/TRIM/SUBSTRING)
+        var literalSafe = Regex.Replace(text, @"'[^']*'", "''");
+        var targetScan = SqlKeywordFromExpr.Replace(literalSafe, " ");
+        foreach (Match m in FromJoinTarget.Matches(targetScan))
+        {
+            if (m.Groups[1].Success)
+            {
+                issues.Add("subquery in FROM/JOIN is not allowed");
+            }
+            else if (m.Groups[2].Success)
+            {
+                var targetView = RptRef.Match(m.Groups[2].Value).Groups[1].Value;
+                if (!knownViews.Contains(targetView))
+                    issues.Add($"unknown FROM/JOIN view rpt.{targetView}");
+            }
+            else if (m.Groups[3].Success)
+            {
+                issues.Add($"invalid FROM/JOIN target '{m.Groups[3].Value}'");
+            }
+        }
+
         // base-table, catalog, audit or system access (aliases of rpt views are allowed)
-        var withoutRpt = RptRef.Replace(text, " ");
-        withoutRpt = Regex.Replace(withoutRpt, @"'[^']*'", "''");        // ignore string literals such as 'AR'
+        var withoutRpt = RptRef.Replace(literalSafe, " ");
         foreach (Match m in BaseSchemaRef.Matches(withoutRpt))
             issues.Add($"references {Regex.Replace(m.Value, @"\s+", "")}");
 

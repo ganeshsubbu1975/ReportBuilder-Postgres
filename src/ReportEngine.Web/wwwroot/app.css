@@ -236,7 +236,10 @@ tbody tr:hover td { background: #eff6ff; }
 .reconcile-box { background: #fff7ed; border: 1px solid #fed7aa; border-radius: 6px; padding: 12px 14px; margin-bottom: 12px; font-size: 0.86rem; }
 
 .modal { position: fixed; inset: 0; background: rgba(15,23,42,.55); display: grid; place-items: center; padding: 20px; z-index: 50; }
-.modal-card { background: #fff; border-radius: 8px; padding: 20px; width: 100%; max-width: 900px; max-height: 85vh; overflow: auto; display: flex; flex-direction: column; gap: 12px; }
-.admin-form { display: grid; grid-template-columns: repeat(5, 1fr) auto; gap: 8px; }
-.admin-form input { padding: 7px 9px; border: 1px solid var(--border); border-radius: 5px; font-size: 0.82rem; }
-.small-table { max-height: 320px; }
+.modal-card { background: #fff; border-radius: 8px; padding: 24px; width: 100%; max-width: 1000px; max-height: 85vh; overflow: auto; display: flex; flex-direction: column; gap: 12px; }
+.admin-form { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)) auto; gap: 12px; align-items: center; margin: 4px 0 8px; }
+.admin-form .btn { white-space: nowrap; padding: 9px 20px; }
+@media (max-width: 860px) { .admin-form { grid-template-columns: repeat(2, minmax(0, 1fr)); } .admin-form .btn { grid-column: 1 / -1; } }
+.admin-form input { min-width: 0; width: 100%; padding: 9px 12px; border: 1px solid var(--border); border-radius: 5px; font-size: 0.82rem; }
+.small-table { max-height: 320px; margin-bottom: 6px; }
+.small-table td:last-child { text-align: right; }

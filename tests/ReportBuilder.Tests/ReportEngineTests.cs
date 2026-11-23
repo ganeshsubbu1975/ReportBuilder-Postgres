@@ -245,6 +245,74 @@ public class ReportEngineTests
         Assert.Equal((byte)'P', pdf[1]);
     }
 
+    [Fact]
+    public void Tag_company_rows_replaces_all_and_prepends_when_missing()
+    {
+        var withCol = new QueryResult
+        {
+            Columns = ["company_code", "customer_name", "total_sales"],
+            Rows = [["ALL", "Acme", 100m], ["TGTM", "Beta", 200m]]
+        };
+        var tagged1 = CompanyDataSourceFactory.TagCompanyRows(withCol, "CAP");
+        Assert.Equal(["company_code", "customer_name", "total_sales"], tagged1.Columns);
+        Assert.Equal("CAP", tagged1.Rows[0][0]);
+        Assert.Equal("TGTM", tagged1.Rows[1][0]);
+
+        var withoutCol = new QueryResult
+        {
+            Columns = ["customer_name", "total_sales"],
+            Rows = [["Acme", 100m]]
+        };
+        var tagged2 = CompanyDataSourceFactory.TagCompanyRows(withoutCol, "TPH");
+        Assert.Equal(["company_code", "customer_name", "total_sales"], tagged2.Columns);
+        Assert.Equal("TPH", tagged2.Rows[0][0]);
+        Assert.Equal("Acme", tagged2.Rows[0][1]);
+        Assert.Equal(100m, tagged2.Rows[0][2]);
+    }
+
+    [Fact]
+    public void Group_pack_pdf_exporter_handles_populated_and_empty_sections()
+    {
+        var sections = new List<GroupPackSection>
+        {
+            new("Sales & Revenue", "Group Top Customers", "Show top customers", "sales_invoice_item_v", "ALL",
+                new QueryResult { Columns = ["company_code", "customer_name", "total_net"], Rows = [["CAP", "Acme", 12500.50m]] }),
+            new("Inventory", "Warehouse Stock", "Show stock", "stock_on_hand_v", "ALL",
+                new QueryResult(), "No records found.")
+        };
+
+        var pdf = ReportExporters.ToGroupPackPdf(sections, "Admin (admin)", ["CAP", "TPH"]);
+        Assert.True(pdf.Length > 2000);
+        Assert.Equal((byte)'%', pdf[0]);
+        Assert.Equal((byte)'P', pdf[1]);
+        Assert.Equal((byte)'D', pdf[2]);
+        Assert.Equal((byte)'F', pdf[3]);
+
+        var singlePdf = ReportExporters.ToGroupPackPdf(
+            sections, "Admin (admin)", ["CAP"],
+            packTitle: "TERO ERP — Single-Company Report Pack (CAP — Capricorn)",
+            scopeHeader: "Company: CAP — Capricorn");
+        Assert.True(singlePdf.Length > 2000);
+        Assert.Equal((byte)'%', singlePdf[0]);
+        Assert.Equal((byte)'P', singlePdf[1]);
+    }
+
+    [Fact]
+    public void Query_catalog_pdfs_render_without_db_and_have_expected_entry_counts()
+    {
+        var (groupPdf, groupEntries) = GroupReportPackService.BuildQueryCatalogPdf(singleCompany: false);
+        Assert.Equal(20, groupEntries.Count);
+        Assert.True(groupPdf.Length > 2000);
+        Assert.Equal((byte)'%', groupPdf[0]);
+        Assert.Equal((byte)'P', groupPdf[1]);
+
+        var (singlePdf, singleEntries) = GroupReportPackService.BuildQueryCatalogPdf(singleCompany: true);
+        Assert.Equal(23, singleEntries.Count);
+        Assert.True(singlePdf.Length > 2000);
+        Assert.Equal((byte)'%', singlePdf[0]);
+        Assert.Equal((byte)'P', singlePdf[1]);
+    }
+
     private sealed class StaticJsonLlm(string json) : ILlmClient
     {
         public Task<string> CompleteTextAsync(ModelRole role, string system, string user, CancellationToken ct = default) =>

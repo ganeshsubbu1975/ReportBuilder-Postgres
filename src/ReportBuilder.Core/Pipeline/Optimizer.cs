@@ -17,7 +17,7 @@ public sealed class Optimizer
         return new CompiledQuery
         {
             Sql = sql, Parameters = parameters, ParameterColumns = q.ParameterColumns, ViewName = q.ViewName, Columns = q.Columns,
-            HasOrderBy = q.HasOrderBy, CommandTimeoutSeconds = 30, FetchLimit = limit
+            HasOrderBy = q.HasOrderBy, OrderSpecs = q.OrderSpecs, CommandTimeoutSeconds = 30, FetchLimit = limit
         };
     }
 }

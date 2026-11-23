@@ -181,8 +181,51 @@ public sealed class CompanyDataSourceFactory : IAsyncDisposable
 
         var areaMeta = await LoadAreaMetadataAsync(ct);
         var viewCols = new Dictionary<string, List<ViewColumnMeta>>(StringComparer.OrdinalIgnoreCase);
+        await CollectViewsFromConnectionAsync(companyConn, session, viewCols, ct);
+        return BuildAreaViews(session, areaMeta, viewCols);
+    }
 
-        var ds = GetOrCreateDataSource(companyConn);
+    /// <summary>Introspects live rpt.* views across all DBs permitted for the session and unions them gracefully.</summary>
+    public async Task<IReadOnlyList<ErpAreaViewMeta>> GetPermittedViewsAcrossCompaniesAsync(
+        ErpUserSession session,
+        CancellationToken ct = default)
+    {
+        if (session.AllowedCompanies.Count == 0) return [];
+
+        var connStrings = new List<string>();
+        foreach (var comp in session.AllowedCompanies)
+        {
+            var cs = await ResolveConnectionStringAsync(comp, ct);
+            if (!string.IsNullOrWhiteSpace(cs) && !connStrings.Contains(cs, StringComparer.Ordinal))
+                connStrings.Add(cs);
+        }
+        if (connStrings.Count == 0) return [];
+
+        var areaMeta = await LoadAreaMetadataAsync(ct);
+        var viewCols = new Dictionary<string, List<ViewColumnMeta>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var cs in connStrings)
+        {
+            try
+            {
+                await CollectViewsFromConnectionAsync(cs, session, viewCols, ct);
+            }
+            catch (NpgsqlException)
+            {
+                // Skip offline or inaccessible tenant databases cleanly so remaining companies still resolve
+            }
+        }
+
+        return BuildAreaViews(session, areaMeta, viewCols);
+    }
+
+    private async Task CollectViewsFromConnectionAsync(
+        string connStr,
+        ErpUserSession session,
+        Dictionary<string, List<ViewColumnMeta>> viewCols,
+        CancellationToken ct)
+    {
+        var local = new Dictionary<string, List<ViewColumnMeta>>(StringComparer.OrdinalIgnoreCase);
+        var ds = GetOrCreateDataSource(connStr);
         await using (var conn = await ds.OpenConnectionAsync(ct))
         {
             await using var cmd = new NpgsqlCommand("""
@@ -197,12 +240,24 @@ public sealed class CompanyDataSourceFactory : IAsyncDisposable
                 var v = r.GetString(0);
                 var c = r.GetString(1);
                 var t = r.GetString(2);
-                if (!viewCols.TryGetValue(v, out var list)) viewCols[v] = list = new();
+                if (!local.TryGetValue(v, out var list)) local[v] = list = new();
                 if (!session.BlockedColumns.Contains(c))
                     list.Add(new ViewColumnMeta(c, t));
             }
         }
 
+        foreach (var (v, cols) in local)
+        {
+            if (cols.Count > 0 && !viewCols.ContainsKey(v))
+                viewCols[v] = cols;
+        }
+    }
+
+    private static List<ErpAreaViewMeta> BuildAreaViews(
+        ErpUserSession session,
+        Dictionary<string, ErpAreaViewMeta> areaMeta,
+        Dictionary<string, List<ViewColumnMeta>> viewCols)
+    {
         var result = new List<ErpAreaViewMeta>();
         foreach (var (viewName, cols) in viewCols.OrderBy(k => k.Key))
         {
@@ -255,6 +310,50 @@ public sealed class CompanyDataSourceFactory : IAsyncDisposable
         return "General";
     }
 
+    /// <summary>Tags every row of a QueryResult with its originating company code when fan-out queries run across companies.</summary>
+    public static QueryResult TagCompanyRows(QueryResult r, string companyCode)
+    {
+        var compIdx = Array.FindIndex(r.Columns, c => c.Equals("company_code", StringComparison.OrdinalIgnoreCase));
+        if (compIdx >= 0)
+        {
+            var tagged = new List<object?[]>(r.Rows.Count);
+            foreach (var row in r.Rows)
+            {
+                var copy = (object?[])row.Clone();
+                var cur = copy[compIdx]?.ToString()?.Trim();
+                if (string.IsNullOrWhiteSpace(cur) || cur.Equals("ALL", StringComparison.OrdinalIgnoreCase))
+                    copy[compIdx] = companyCode;
+                tagged.Add(copy);
+            }
+            return new QueryResult
+            {
+                Columns = (string[])r.Columns.Clone(),
+                Rows = tagged,
+                Truncated = r.Truncated
+            };
+        }
+
+        var cols = new string[r.Columns.Length + 1];
+        cols[0] = "company_code";
+        Array.Copy(r.Columns, 0, cols, 1, r.Columns.Length);
+
+        var rows = new List<object?[]>(r.Rows.Count);
+        foreach (var row in r.Rows)
+        {
+            var copy = new object?[row.Length + 1];
+            copy[0] = companyCode;
+            Array.Copy(row, 0, copy, 1, row.Length);
+            rows.Add(copy);
+        }
+
+        return new QueryResult
+        {
+            Columns = cols,
+            Rows = rows,
+            Truncated = r.Truncated
+        };
+    }
+
     /// <summary>Executes a compiled query against one company or fans out in parallel across all permitted companies and merges rows.</summary>
     public async Task<QueryResult> ExecuteCompiledAsync(
         ErpUserSession session,
@@ -263,7 +362,8 @@ public sealed class CompanyDataSourceFactory : IAsyncDisposable
         IReadOnlyList<ViewColumnMeta> viewColumns,
         CancellationToken ct = default)
     {
-        var targets = companyCode.Equals("ALL", StringComparison.OrdinalIgnoreCase)
+        var isAll = companyCode.Equals("ALL", StringComparison.OrdinalIgnoreCase);
+        var targets = isAll
             ? session.AllowedCompanies.ToList()
             : session.AllowedCompanies.Where(c => c.Code.Equals(companyCode, StringComparison.OrdinalIgnoreCase)).ToList();
 
@@ -272,11 +372,12 @@ public sealed class CompanyDataSourceFactory : IAsyncDisposable
 
         var colTypes = viewColumns.ToDictionary(c => c.Name, c => c.DataType, StringComparer.OrdinalIgnoreCase);
 
-        if (targets.Count == 1)
+        if (targets.Count == 1 && !isAll)
         {
             var cs = await ResolveConnectionStringAsync(targets[0], ct)
                 ?? throw new InvalidOperationException($"No database mapping configured for company {targets[0].Code}.");
-            return await RunSingleAsync(cs, targets[0].Code, query, colTypes, ct);
+            var single = await RunSingleAsync(cs, targets[0].Code, query, colTypes, ct);
+            return AddCompanyName(TagCompanyRows(single, targets[0].Code), targets);
         }
 
         // Parallel C# Fan-Out & Merge across unique target databases
@@ -288,24 +389,114 @@ public sealed class CompanyDataSourceFactory : IAsyncDisposable
         }
 
         var distinctDbs = resolved.GroupBy(x => x.ConnStr).Select(g => g.First()).ToList();
-        var tasks = distinctDbs.Select(x => RunSingleAsync(x.ConnStr, x.CompanyCode, query, colTypes, ct)).ToArray();
+        var tasks = distinctDbs
+            .Select(x => RunSingleSafeAsync(x.ConnStr, x.CompanyCode, query, colTypes, ct))
+            .ToArray();
         var results = await Task.WhenAll(tasks);
+
+        var nonNull = results.Where(r => r is not null).Cast<QueryResult>().ToList();
+        if (nonNull.Count == 0)
+            return new QueryResult { Columns = query.Columns };
 
         var merged = new QueryResult
         {
-            Columns = results.FirstOrDefault(r => r.Columns.Length > 0)?.Columns ?? query.Columns
+            Columns = nonNull[0].Columns.Length > 0 ? nonNull[0].Columns : query.Columns
         };
-        foreach (var r in results)
+        foreach (var r in nonNull)
         {
             merged.Rows.AddRange(r.Rows);
             merged.Truncated |= r.Truncated;
         }
-        if (query.FetchLimit > 0 && merged.Rows.Count > query.FetchLimit)
+        // Group run: the LIMIT already applied inside each company database, so every company keeps its own top N
+        // (a single global top N would be dominated by whichever company has the largest numbers). Order by company, then by the report's sort.
+        SortMergedRows(merged, query.OrderSpecs, groupByCompany: true);
+        const int GroupRowCap = 5000;
+        if (merged.Rows.Count > GroupRowCap)
         {
-            merged.Rows = merged.Rows.Take(query.FetchLimit).ToList();
+            merged.Rows = merged.Rows.Take(GroupRowCap).ToList();
             merged.Truncated = true;
         }
-        return merged;
+        return AddCompanyName(merged, targets);
+    }
+
+    /// <summary>Orders merged group rows by company, then by the report's ORDER BY, so each company's top rows stay together.</summary>
+    private static void SortMergedRows(QueryResult merged, IReadOnlyList<(string Column, bool Desc)> specs, bool groupByCompany = false)
+    {
+        if (merged.Rows.Count < 2) return;
+        var companyIdx = groupByCompany ? Array.FindIndex(merged.Columns, c => c.Equals("company_code", StringComparison.OrdinalIgnoreCase)) : -1;
+        if (specs.Count == 0 && companyIdx < 0) return;
+        var keys = specs.Select(s => (Idx: Array.FindIndex(merged.Columns, c => c.Equals(s.Column, StringComparison.OrdinalIgnoreCase)), s.Desc))
+                        .Where(k => k.Idx >= 0).ToList();
+        if (keys.Count == 0 && companyIdx < 0) return;
+
+        static int Cmp(object? a, object? b)
+        {
+            if (a is null || a is DBNull) return (b is null || b is DBNull) ? 0 : 1;   // nulls last
+            if (b is null || b is DBNull) return -1;
+            if (a is IComparable ca && a.GetType() == b.GetType()) return ca.CompareTo(b);
+            if (decimal.TryParse(Convert.ToString(a, System.Globalization.CultureInfo.InvariantCulture), System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var da) &&
+                decimal.TryParse(Convert.ToString(b, System.Globalization.CultureInfo.InvariantCulture), System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var db)) return da.CompareTo(db);
+            return string.Compare(a.ToString(), b.ToString(), StringComparison.OrdinalIgnoreCase);
+        }
+
+        merged.Rows = merged.Rows.Select((r, i) => (Row: r, Pos: i))
+            .OrderBy(x => x, Comparer<(object?[] Row, int Pos)>.Create((x, y) =>
+            {
+                if (companyIdx >= 0)
+                {
+                    var cc = string.Compare(x.Row[companyIdx]?.ToString(), y.Row[companyIdx]?.ToString(), StringComparison.OrdinalIgnoreCase);
+                    if (cc != 0) return cc;
+                }
+                foreach (var (idx, desc) in keys)
+                {
+                    var c = Cmp(x.Row[idx], y.Row[idx]);
+                    if (c != 0) return desc && !(x.Row[idx] is null || x.Row[idx] is DBNull) && !(y.Row[idx] is null || y.Row[idx] is DBNull) ? -c : c;
+                }
+                return x.Pos.CompareTo(y.Pos);
+            }))
+            .Select(x => x.Row).ToList();
+    }
+
+    /// <summary>Views hard-code company_code='ALL' (each company has its own database), so after the code is tagged we also add a readable company_name column right after company_code.</summary>
+    public static QueryResult AddCompanyName(QueryResult r, IEnumerable<CompanyAccessInfo> companies)
+    {
+        var codeIdx = Array.FindIndex(r.Columns, c => c.Equals("company_code", StringComparison.OrdinalIgnoreCase));
+        if (codeIdx < 0 || r.Columns.Any(c => c.Equals("company_name", StringComparison.OrdinalIgnoreCase))) return r;
+
+        var names = companies.GroupBy(c => c.Code, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First().Name, StringComparer.OrdinalIgnoreCase);
+
+        var cols = r.Columns.Take(codeIdx + 1).Append("company_name").Concat(r.Columns.Skip(codeIdx + 1)).ToArray();
+        var rows = new List<object?[]>(r.Rows.Count);
+        foreach (var row in r.Rows)
+        {
+            var code = row[codeIdx]?.ToString()?.Trim() ?? "";
+            var copy = new object?[row.Length + 1];
+            Array.Copy(row, 0, copy, 0, codeIdx + 1);
+            copy[codeIdx + 1] = names.TryGetValue(code, out var n) ? n : code;
+            Array.Copy(row, codeIdx + 1, copy, codeIdx + 2, row.Length - codeIdx - 1);
+            rows.Add(copy);
+        }
+        return new QueryResult { Columns = cols, Rows = rows, Truncated = r.Truncated };
+    }
+
+    private async Task<QueryResult?> RunSingleSafeAsync(
+        string connStr,
+        string companyCode,
+        CompiledQuery query,
+        IReadOnlyDictionary<string, string> colTypes,
+        CancellationToken ct)
+    {
+        try
+        {
+            var res = await RunSingleAsync(connStr, companyCode, query, colTypes, ct);
+            return TagCompanyRows(res, companyCode);
+        }
+        catch (PostgresException ex) when (ex.SqlState is "42P01" or "3F000" or "42703")
+        {
+            // Skip DBs that do not expose this particular rpt view/column (e.g. Console DB or optional modules)
+            return null;
+        }
     }
 
     private async Task<QueryResult> RunSingleAsync(
@@ -399,6 +590,9 @@ public sealed class CompanyDataSourceFactory : IAsyncDisposable
         string defaultFields,
         CancellationToken ct = default)
     {
+        if (!Views.ViewBuilder.IsValidViewName(viewName))
+            throw new ArgumentException($"Invalid view name '{viewName}'.", nameof(viewName));
+
         var cs = await ResolveConnectionStringAsync(company, ct)
             ?? throw new InvalidOperationException($"No database mapped for {company.Code}.");
         var designerConn = ApplyDesignerCredentials(cs);

@@ -108,8 +108,14 @@ public static class DynamicReportCompiler
             var fn = (agg.Function ?? "").Trim().ToUpperInvariant();
             if (!AllowedAggs.Contains(fn)) { errors.Add($"Aggregation '{agg.Function}' is not allowed."); continue; }
             if (fn != "COUNT" && !colSet.Contains(agg.Column)) { errors.Add($"Aggregation column '{agg.Column}' does not exist."); continue; }
-            if (!string.IsNullOrWhiteSpace(agg.Column) && session.BlockedColumns.Contains(agg.Column))
+            if (!string.IsNullOrWhiteSpace(agg.Column) && agg.Column != "*" && session.BlockedColumns.Contains(agg.Column))
                 { errors.Add($"Column '{agg.Column}' is restricted by RBAC."); continue; }
+            if ((fn == "SUM" || fn == "AVG") && !string.IsNullOrWhiteSpace(agg.Column))
+            {
+                var aggColMeta = viewMeta.Columns.FirstOrDefault(c => c.Name.Equals(agg.Column, StringComparison.OrdinalIgnoreCase));
+                if (aggColMeta is not null && !GuardrailOutputVerifier.IsNumericType(aggColMeta.DataType))
+                    { errors.Add($"Aggregation '{fn}' cannot be applied to non-numeric column '{agg.Column}' ({aggColMeta.DataType})."); continue; }
+            }
 
             var colExpr = (fn == "COUNT" && string.IsNullOrWhiteSpace(agg.Column)) ? "*" : agg.Column;
             var alias = string.IsNullOrWhiteSpace(agg.Alias)
@@ -191,19 +197,28 @@ public static class DynamicReportCompiler
 
         if (!string.IsNullOrWhiteSpace(req.RelativePeriod) && !req.RelativePeriod.Equals("all", StringComparison.OrdinalIgnoreCase))
         {
-            var dateCol = !string.IsNullOrWhiteSpace(req.DateColumn) && colSet.Contains(req.DateColumn)
-                ? req.DateColumn
-                : viewMeta.DateColumn ?? viewMeta.Columns.FirstOrDefault(c => c.DataType.Contains("date", StringComparison.OrdinalIgnoreCase) || c.DataType.Contains("timestamp", StringComparison.OrdinalIgnoreCase))?.Name;
-
-            if (dateCol is not null && ResolveRelativeStart(req.RelativePeriod, (todayUtc ?? DateTime.UtcNow).Date) is { } start)
+            var start = ResolveRelativeStart(req.RelativePeriod, (todayUtc ?? DateTime.UtcNow).Date);
+            if (start is null)
             {
-                var pStart = AddParam(dateCol, start.ToString("yyyy-MM-dd"));
-                whereParts.Add($"{dateCol} >= {pStart}");
+                errors.Add($"Relative period '{req.RelativePeriod}' is not supported.");
+            }
+            else
+            {
+                var dateCol = !string.IsNullOrWhiteSpace(req.DateColumn) && colSet.Contains(req.DateColumn)
+                    ? req.DateColumn
+                    : viewMeta.DateColumn ?? viewMeta.Columns.FirstOrDefault(c => c.DataType.Contains("date", StringComparison.OrdinalIgnoreCase) || c.DataType.Contains("timestamp", StringComparison.OrdinalIgnoreCase))?.Name;
+
+                if (dateCol is not null)
+                {
+                    var pStart = AddParam(dateCol, start.Value.ToString("yyyy-MM-dd"));
+                    whereParts.Add($"{dateCol} >= {pStart}");
+                }
             }
         }
 
         // 4. Validate ORDER BY
         var orderParts = new List<string>();
+        var orderSpecs = new List<(string Column, bool Desc)>();
         foreach (var s in req.OrderBy)
         {
             if (string.IsNullOrWhiteSpace(s.Column)) continue;
@@ -213,6 +228,7 @@ public static class DynamicReportCompiler
                 { errors.Add($"Sort column '{s.Column}' is restricted by RBAC."); continue; }
             var dir = s.Direction.Equals("ASC", StringComparison.OrdinalIgnoreCase) ? "ASC" : "DESC";
             orderParts.Add($"{s.Column} {dir}");
+            orderSpecs.Add((s.Column, dir == "DESC"));
         }
 
         // 3b. Validate HAVING filters (only against defined aggregation aliases)
@@ -253,6 +269,7 @@ public static class DynamicReportCompiler
             ViewName = viewMeta.ViewName,
             Columns = outputCols.ToArray(),
             HasOrderBy = orderParts.Count > 0,
+            OrderSpecs = orderSpecs,
             FetchLimit = limit
         });
     }

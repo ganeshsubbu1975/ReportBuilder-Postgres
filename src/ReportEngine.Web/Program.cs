@@ -24,6 +24,7 @@ builder.Configuration.AddJsonFile("tenants.json", optional: true, reloadOnChange
 builder.Configuration.AddUserSecrets<Program>(optional: true);
 
 builder.Services.AddReportBuilder(builder.Configuration);
+builder.Services.AddSingleton<GroupReportPackService>();
 builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
     .AddCookie(o =>
     {
@@ -105,12 +106,7 @@ api.MapGet("/schema/areas", async (string company, HttpContext ctx, ErpSecurityP
     if (session is null) return Results.Unauthorized();
 
     if (company.Equals("ALL", StringComparison.OrdinalIgnoreCase))
-    {
-        var first = session.AllowedCompanies.FirstOrDefault();
-        if (first is null) return Results.Ok(Array.Empty<ErpAreaViewMeta>());
-        var views = await dsf.GetPermittedViewsAsync(session, first, ct);
-        return Results.Ok(views);
-    }
+        return Results.Ok(await dsf.GetPermittedViewsAcrossCompaniesAsync(session, ct));
 
     var comp = session.AllowedCompanies.FirstOrDefault(c => c.Code.Equals(company, StringComparison.OrdinalIgnoreCase));
     if (comp is null) return Results.Forbid();
@@ -118,21 +114,88 @@ api.MapGet("/schema/areas", async (string company, HttpContext ctx, ErpSecurityP
 });
 
 // ---- Zero-DB-Access AI Query Planner ----
-api.MapPost("/reports/ai-configure", async (AiConfigureInput input, HttpContext ctx, ErpSecurityProvider sec, CompanyDataSourceFactory dsf, AiReportAssistant ai, CancellationToken ct) =>
+api.MapPost("/reports/ai-configure", async (AiConfigureInput input, HttpContext ctx, ErpSecurityProvider sec, CompanyDataSourceFactory dsf, AiReportAssistant ai, IAuditStore audit, IOptions<PolicyOptions> policyOpts, CancellationToken ct) =>
 {
+    var sw = Stopwatch.StartNew();
     var session = await ResolveActiveSessionAsync(ctx, sec, dsf, input.CompanyCode, ct);
     if (session is null) return Results.Unauthorized();
 
-    var target = input.CompanyCode.Equals("ALL", StringComparison.OrdinalIgnoreCase)
+    var isAll = input.CompanyCode.Equals("ALL", StringComparison.OrdinalIgnoreCase);
+    var target = isAll
         ? session.AllowedCompanies.FirstOrDefault()
         : session.AllowedCompanies.FirstOrDefault(c => c.Code.Equals(input.CompanyCode, StringComparison.OrdinalIgnoreCase));
 
     if (target is null) return Results.Forbid();
 
-    var permittedViews = await dsf.GetPermittedViewsAsync(session, target, ct);
+    var permittedViews = isAll
+        ? await dsf.GetPermittedViewsAcrossCompaniesAsync(session, ct)
+        : await dsf.GetPermittedViewsAsync(session, target, ct);
     try
     {
-        var res = await ai.ConfigureAsync(input.Question, input.CompanyCode, permittedViews, ct);
+        var res = await ai.ConfigureAsync(
+            input.Question,
+            input.CompanyCode,
+            permittedViews,
+            session.BlockedColumns,
+            policyOpts.Value.DefaultMaxRows,
+            ct);
+
+        if (res.IsReconcile && (!session.AllowsView("control_totals_v") || !session.AllowsView("manual_postings_v") || !session.AllowsView("trial_balance_v")))
+        {
+            res = new AiConfigureResult
+            {
+                IsReconcile = false,
+                GuardrailBlocked = true,
+                GuardrailCategory = "RbacDenied",
+                MissingDataNote = "You do not have RBAC permission to run GL/Trial Balance reconciliation.",
+                Explanation = "GL/Trial Balance reconciliation is not permitted for your role."
+            };
+        }
+        else if (res.Request is not null)
+        {
+            var matchedView = permittedViews.FirstOrDefault(v =>
+                v.ViewName.Equals(res.Request.ViewName, StringComparison.OrdinalIgnoreCase));
+            if (matchedView is null)
+            {
+                res = new AiConfigureResult
+                {
+                    GuardrailBlocked = true,
+                    GuardrailCategory = "RbacDenied",
+                    MissingDataNote = $"Guardrail blocked unpermitted view '{res.Request.ViewName}'.",
+                    Explanation = "Matched view is not permitted."
+                };
+            }
+            else
+            {
+                var compiled = DynamicReportCompiler.Compile(
+                    res.Request, session, matchedView, DateTime.UtcNow, policyOpts.Value.DefaultMaxRows);
+                if (!compiled.Ok)
+                {
+                    var errMsg = "Guardrail rejected the generated report configuration: " + string.Join("; ", compiled.Errors);
+                    res = new AiConfigureResult
+                    {
+                        GuardrailBlocked = true,
+                        GuardrailCategory = "CompileGuardrail",
+                        MissingDataNote = errMsg,
+                        Explanation = errMsg
+                    };
+                }
+            }
+        }
+
+        if (res.IsOutOfScope || res.GuardrailBlocked)
+        {
+            await audit.AppendAsync(new AuditEntry(
+                session.UserName,
+                $"[AI-Configure:{input.CompanyCode}] {input.Question}",
+                res.IsOutOfScope ? "OutOfScope" : "GuardrailBlocked",
+                null,
+                null,
+                0,
+                JsonSerializer.Serialize(new[] { new { Code = res.GuardrailCategory ?? "Guardrail", Message = res.MissingDataNote ?? res.Explanation } }),
+                (int)sw.ElapsedMilliseconds), ct);
+        }
+
         return Results.Ok(res);
     }
     catch (Exception ex)
@@ -148,13 +211,16 @@ api.MapPost("/reports/run", async (DynamicReportRequest req, HttpContext ctx, Er
     var session = await ResolveActiveSessionAsync(ctx, sec, dsf, req.CompanyCode, ct);
     if (session is null) return Results.Unauthorized();
 
-    var refCompany = req.CompanyCode.Equals("ALL", StringComparison.OrdinalIgnoreCase)
+    var isAll = req.CompanyCode.Equals("ALL", StringComparison.OrdinalIgnoreCase);
+    var refCompany = isAll
         ? session.AllowedCompanies.FirstOrDefault()
         : session.AllowedCompanies.FirstOrDefault(c => c.Code.Equals(req.CompanyCode, StringComparison.OrdinalIgnoreCase));
 
     if (refCompany is null) return Results.Forbid();
 
-    var views = await dsf.GetPermittedViewsAsync(session, refCompany, ct);
+    var views = isAll
+        ? await dsf.GetPermittedViewsAcrossCompaniesAsync(session, ct)
+        : await dsf.GetPermittedViewsAsync(session, refCompany, ct);
     var viewMeta = views.FirstOrDefault(v => v.ViewName.Equals(req.ViewName, StringComparison.OrdinalIgnoreCase));
     if (viewMeta is null)
         return Results.BadRequest(new { error = $"View '{req.ViewName}' is not available or not permitted." });
@@ -206,6 +272,24 @@ api.MapPost("/reconcile", async (ReconcileInput input, HttpContext ctx, ErpSecur
     var session = await ResolveActiveSessionAsync(ctx, sec, dsf, input.CompanyCode, ct);
     if (session is null) return Results.Unauthorized();
 
+    if (!string.IsNullOrWhiteSpace(input.Question))
+    {
+        var decision = ScopeGuardrail.InspectInput(input.Question, session.BlockedColumns);
+        if (!decision.Allowed)
+        {
+            await audit.AppendAsync(new AuditEntry(
+                session.UserName,
+                $"[Reconcile:{input.CompanyCode}] {input.Question}",
+                "GuardrailBlocked",
+                null,
+                null,
+                0,
+                JsonSerializer.Serialize(new[] { new { Code = decision.Category, Message = decision.Reason } }),
+                (int)sw.ElapsedMilliseconds), ct);
+            return Results.BadRequest(new { error = decision.Reason, isOutOfScope = true });
+        }
+    }
+
     var comp = session.AllowedCompanies.FirstOrDefault(c => c.Code.Equals(input.CompanyCode, StringComparison.OrdinalIgnoreCase));
     if (comp is null) return Results.Forbid();
 
@@ -236,17 +320,68 @@ api.MapPost("/reconcile", async (ReconcileInput input, HttpContext ctx, ErpSecur
 });
 
 // ---- Multi-Format Exports (CSV, Excel .xlsx, PDF, JSON) ----
+api.MapPost("/reports/export-group-pack", async (HttpContext ctx, ErpSecurityProvider sec, CompanyDataSourceFactory dsf, GroupReportPackService packSvc, IAuditStore audit, CancellationToken ct) =>
+{
+    var sw = Stopwatch.StartNew();
+    var session = await ResolveActiveSessionAsync(ctx, sec, dsf, null, ct);
+    if (session is null) return Results.Unauthorized();
+    if (session.AllowedCompanies.Count == 0) return Results.Forbid();
+
+    var output = await packSvc.BuildPdfAsync(session, ct);
+    var totalRows = output.Sections.Sum(s => s.Result.Rows.Count);
+    await audit.AppendAsync(new AuditEntry(
+        session.UserName,
+        "[GroupPack:ALL] Cross-Company Executive PDF Pack",
+        "Exported",
+        null,
+        null,
+        totalRows,
+        JsonSerializer.Serialize(new { sections = output.Sections.Count }),
+        (int)sw.ElapsedMilliseconds), ct);
+
+    var fileName = $"TERO_CrossCompany_Group_Reports_{DateTime.UtcNow:yyyyMMddHHmm}.pdf";
+    return Results.File(output.PdfBytes, "application/pdf", fileName);
+});
+
+api.MapPost("/reports/export-company-pack", async (string company, HttpContext ctx, ErpSecurityProvider sec, CompanyDataSourceFactory dsf, GroupReportPackService packSvc, IAuditStore audit, CancellationToken ct) =>
+{
+    var sw = Stopwatch.StartNew();
+    var session = await ResolveActiveSessionAsync(ctx, sec, dsf, company, ct);
+    if (session is null) return Results.Unauthorized();
+
+    var comp = session.AllowedCompanies.FirstOrDefault(c => c.Code.Equals(company, StringComparison.OrdinalIgnoreCase));
+    if (comp is null) return Results.Forbid();
+
+    var output = await packSvc.BuildSingleCompanyPdfAsync(session, comp, ct);
+    var totalRows = output.Sections.Sum(s => s.Result.Rows.Count);
+    await audit.AppendAsync(new AuditEntry(
+        session.UserName,
+        $"[CompanyPack:{comp.Code}] Single-Company Report Pack PDF",
+        "Exported",
+        null,
+        null,
+        totalRows,
+        JsonSerializer.Serialize(new { company = comp.Code, sections = output.Sections.Count }),
+        (int)sw.ElapsedMilliseconds), ct);
+
+    var fileName = $"TERO_SingleCompany_Reports_{comp.Code}_{DateTime.UtcNow:yyyyMMddHHmm}.pdf";
+    return Results.File(output.PdfBytes, "application/pdf", fileName);
+});
+
 api.MapPost("/reports/export/{format}", async (string format, DynamicReportRequest req, HttpContext ctx, ErpSecurityProvider sec, CompanyDataSourceFactory dsf, IOptions<PolicyOptions> policyOpts, CancellationToken ct) =>
 {
     var session = await ResolveActiveSessionAsync(ctx, sec, dsf, req.CompanyCode, ct);
     if (session is null) return Results.Unauthorized();
 
-    var refCompany = req.CompanyCode.Equals("ALL", StringComparison.OrdinalIgnoreCase)
+    var isAll = req.CompanyCode.Equals("ALL", StringComparison.OrdinalIgnoreCase);
+    var refCompany = isAll
         ? session.AllowedCompanies.FirstOrDefault()
         : session.AllowedCompanies.FirstOrDefault(c => c.Code.Equals(req.CompanyCode, StringComparison.OrdinalIgnoreCase));
     if (refCompany is null) return Results.Forbid();
 
-    var views = await dsf.GetPermittedViewsAsync(session, refCompany, ct);
+    var views = isAll
+        ? await dsf.GetPermittedViewsAcrossCompaniesAsync(session, ct)
+        : await dsf.GetPermittedViewsAsync(session, refCompany, ct);
     var viewMeta = views.FirstOrDefault(v => v.ViewName.Equals(req.ViewName, StringComparison.OrdinalIgnoreCase));
     if (viewMeta is null) return Results.BadRequest(new { error = $"View '{req.ViewName}' not found or not permitted." });
 
@@ -325,8 +460,9 @@ api.MapPost("/admin/company-db-map", async (CompanyDatabaseMapping map, HttpCont
 });
 
 // ---- AI-Suggested View Drafts + Admin 1-Click Approve & Create ----
-api.MapPost("/views/suggest-draft", async (AiConfigureInput input, HttpContext ctx, ErpSecurityProvider sec, CompanyDataSourceFactory dsf, AiReportAssistant ai, IViewStore viewStore, IOptions<DesignerOptions> designerOpts, IOptions<PolicyOptions> policyOpts, CancellationToken ct) =>
+api.MapPost("/views/suggest-draft", async (AiConfigureInput input, HttpContext ctx, ErpSecurityProvider sec, CompanyDataSourceFactory dsf, AiReportAssistant ai, IViewStore viewStore, IAuditStore audit, IOptions<DesignerOptions> designerOpts, IOptions<PolicyOptions> policyOpts, CancellationToken ct) =>
 {
+    var sw = Stopwatch.StartNew();
     var session = await ResolveActiveSessionAsync(ctx, sec, dsf, input.CompanyCode, ct);
     if (session is null) return Results.Unauthorized();
     var comp = session.AllowedCompanies.FirstOrDefault(c => c.Code.Equals(input.CompanyCode, StringComparison.OrdinalIgnoreCase));
@@ -336,7 +472,23 @@ api.MapPost("/views/suggest-draft", async (AiConfigureInput input, HttpContext c
     if (sources.Count == 0) return Results.BadRequest(new { error = "No source tables available for view design." });
 
     var existing = (await dsf.GetPermittedViewsAsync(session, comp, ct)).Select(v => v.ViewName).ToArray();
-    var (req, areaName) = await ai.SuggestViewDraftAsync(input.Question, sources, ct);
+    var suggestion = await ai.SuggestViewDraftAsync(input.Question, sources, policyOpts.Value.BlockedColumns, ct);
+    if (!suggestion.Ok || suggestion.Request is null)
+    {
+        await audit.AppendAsync(new AuditEntry(
+            session.UserName,
+            $"[SuggestDraft:{input.CompanyCode}] {input.Question}",
+            suggestion.IsOutOfScope ? "OutOfScope" : "GuardrailBlocked",
+            null,
+            null,
+            0,
+            JsonSerializer.Serialize(new[] { new { Code = suggestion.IsOutOfScope ? "OutOfScope" : "ViewDraftGuardrail", Message = suggestion.RefusalReason ?? "View draft blocked." } }),
+            (int)sw.ElapsedMilliseconds), ct);
+        return Results.BadRequest(new { error = suggestion.RefusalReason, isOutOfScope = suggestion.IsOutOfScope });
+    }
+
+    var req = suggestion.Request;
+    var areaName = suggestion.AreaName;
     var built = ViewBuilder.Build(req, sources, policyOpts.Value.BlockedColumns, existing);
     if (!built.Ok)
         return Results.BadRequest(new { error = string.Join("; ", built.Issues) });
@@ -386,46 +538,143 @@ api.MapPost("/admin/view-drafts/{id:int}/reject", async (int id, HttpContext ctx
 });
 
 app.MapGet("/healthz", () => Results.Ok("ok"));
+
+static async Task<ErpUserSession?> ResolveCliSessionAsync(ErpSecurityProvider sec, string? requestedUser)
+{
+    if (!string.IsNullOrWhiteSpace(requestedUser))
+        return await sec.ResolveUserAsync(requestedUser.Trim(), null, CancellationToken.None);
+
+    var users = await sec.ListUsersAsync(100, CancellationToken.None);
+    var ordered = users.Where(u => u.IsActive).OrderByDescending(u => u.ViewAllFlags).Take(15);
+    ErpUserSession? best = null;
+    foreach (var u in ordered)
+    {
+        var cand = await sec.ResolveUserAsync(u.UserName, null, CancellationToken.None);
+        if (cand is null || !cand.IsActive || cand.AllowedCompanies.Count == 0) continue;
+        if (cand.ViewAllFlags && cand.AllowedCompanies.Count >= (best?.AllowedCompanies.Count ?? 0))
+            return cand;
+        if (best is null || cand.AllowedCompanies.Count > best.AllowedCompanies.Count)
+            best = cand;
+    }
+    return best;
+}
+
+static async Task<CompanyAccessInfo?> SelectBestOperationalCompanyAsync(
+    ErpUserSession session, CompanyDataSourceFactory dsf, string? requestedCompany)
+{
+    if (!string.IsNullOrWhiteSpace(requestedCompany))
+        return session.AllowedCompanies.FirstOrDefault(c => c.Code.Equals(requestedCompany.Trim(), StringComparison.OrdinalIgnoreCase));
+
+    var candidates = session.AllowedCompanies.Where(c => !c.Code.Equals("TGC", StringComparison.OrdinalIgnoreCase)).ToList();
+    if (candidates.Count == 0) candidates = session.AllowedCompanies.ToList();
+
+    CompanyAccessInfo? best = candidates.FirstOrDefault();
+    long bestScore = -1;
+    var seenConn = new HashSet<string>(StringComparer.Ordinal);
+    foreach (var c in candidates.OrderByDescending(x => x.Code.Equals("TGTM", StringComparison.OrdinalIgnoreCase) ? 1 : 0))
+    {
+        var cs = await dsf.ResolveConnectionStringAsync(c, CancellationToken.None);
+        if (string.IsNullOrWhiteSpace(cs) || !seenConn.Add(cs)) continue;
+        try
+        {
+            var ds = dsf.GetOrCreateDataSource(cs);
+            await using var conn = await ds.OpenConnectionAsync(CancellationToken.None);
+            await using var cmd = new NpgsqlCommand(
+                "SELECT (SELECT COUNT(*) FROM rpt.sales_invoice_item_v) + (SELECT COUNT(*) FROM rpt.ar_aging_v)", conn);
+            var score = Convert.ToInt64(await cmd.ExecuteScalarAsync(CancellationToken.None));
+            if (score > bestScore)
+            {
+                bestScore = score;
+                best = c;
+            }
+        }
+        catch (NpgsqlException)
+        {
+            // Skip DBs lacking sales_invoice_item_v / ar_aging_v or unreachable
+        }
+    }
+    return best;
+}
+
+static string? GetCliArgValue(string[] allArgs, string flag)
+{
+    var idx = Array.IndexOf(allArgs, flag);
+    return idx >= 0 && idx + 1 < allArgs.Length && !allArgs[idx + 1].StartsWith("--") ? allArgs[idx + 1] : null;
+}
+
+var catalogIdx = Array.IndexOf(args, "--export-query-catalog-pdfs");
+if (catalogIdx >= 0)
+{
+    var dir = GetCliArgValue(args, "--export-query-catalog-pdfs") ?? "documents";
+    var fullDir = Path.GetFullPath(dir);
+    Directory.CreateDirectory(fullDir);
+
+    var (groupPdf, groupEntries) = GroupReportPackService.BuildQueryCatalogPdf(singleCompany: false);
+    var groupPath = Path.Combine(fullDir, "TERO_CrossCompany_Group_Reports.pdf");
+    await File.WriteAllBytesAsync(groupPath, groupPdf);
+
+    var (singlePdf, singleEntries) = GroupReportPackService.BuildQueryCatalogPdf(singleCompany: true);
+    var singlePath = Path.Combine(fullDir, "TERO_SingleCompany_Reports.pdf");
+    await File.WriteAllBytesAsync(singlePath, singlePdf);
+
+    Console.WriteLine($"Exported query catalog PDFs (no live data):");
+    Console.WriteLine($"- {groupPath} ({groupPdf.Length} bytes, {groupEntries.Count} queries)");
+    Console.WriteLine($"- {singlePath} ({singlePdf.Length} bytes, {singleEntries.Count} queries)");
+    return;
+}
+
+var exportGroupIdx = Array.IndexOf(args, "--export-group-pdf");
+var exportCompIdx = Array.IndexOf(args, "--export-company-pdf");
+if (exportGroupIdx >= 0 || exportCompIdx >= 0)
+{
+    using var scope = app.Services.CreateScope();
+    var sec = scope.ServiceProvider.GetRequiredService<ErpSecurityProvider>();
+    var dsf = scope.ServiceProvider.GetRequiredService<CompanyDataSourceFactory>();
+    var packSvc = scope.ServiceProvider.GetRequiredService<GroupReportPackService>();
+
+    var session = await ResolveCliSessionAsync(sec, GetCliArgValue(args, "--user"));
+    if (session is null || !session.IsActive)
+    {
+        Console.Error.WriteLine("No active ERP user session could be resolved for PDF export.");
+        Environment.ExitCode = 1;
+        return;
+    }
+
+    GroupPackOutput output;
+    string outPath;
+    if (exportCompIdx >= 0)
+    {
+        outPath = GetCliArgValue(args, "--export-company-pdf") ?? "TERO_SingleCompany_Reports.pdf";
+        var comp = await SelectBestOperationalCompanyAsync(session, dsf, GetCliArgValue(args, "--company"));
+        if (comp is null)
+        {
+            Console.Error.WriteLine("No matching operational company found for single-company PDF export.");
+            Environment.ExitCode = 1;
+            return;
+        }
+        Console.WriteLine($"Company: {comp.Code} — {comp.Name}");
+        output = await packSvc.BuildSingleCompanyPdfAsync(session, comp, CancellationToken.None);
+    }
+    else
+    {
+        outPath = GetCliArgValue(args, "--export-group-pdf") ?? "TERO_CrossCompany_Group_Reports.pdf";
+        output = await packSvc.BuildPdfAsync(session, CancellationToken.None);
+    }
+
+    var fullPath = Path.GetFullPath(outPath);
+    var dir = Path.GetDirectoryName(fullPath);
+    if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+    await File.WriteAllBytesAsync(fullPath, output.PdfBytes);
+
+    var totalRows = output.Sections.Sum(s => s.Result.Rows.Count);
+    Console.WriteLine($"Exported {fullPath} ({output.PdfBytes.Length} bytes, {output.Sections.Count} sections, {totalRows} total rows)");
+    foreach (var s in output.Sections)
+        Console.WriteLine($"- {s.Title}: {s.Result.Rows.Count} rows{(string.IsNullOrWhiteSpace(s.Note) ? "" : $" [{s.Note}]")}");
+    return;
+}
+
 app.Run();
 
 public sealed record LoginRequest(string UserName, string? Password);
 public sealed record AiConfigureInput(string Question, string CompanyCode);
 public sealed record ReconcileInput(string CompanyCode, string? Question, string[]? Areas);
-
-internal sealed class CompanyReconciliationSource(NpgsqlDataSource ds) : IReconciliationSource
-{
-    public async Task<IReadOnlyList<ControlTotal>> GetControlTotalsAsync(string company, CancellationToken ct)
-    {
-        var list = new List<ControlTotal>();
-        await using var conn = await ds.OpenConnectionAsync(ct);
-        await using var cmd = new NpgsqlCommand(
-            "SELECT area, gl_balance, subledger_balance, difference FROM rpt.control_totals_v WHERE company_code = @c OR company_code = 'ALL'", conn);
-        cmd.Parameters.AddWithValue("c", company);
-        await using var r = await cmd.ExecuteReaderAsync(ct);
-        while (await r.ReadAsync(ct))
-            list.Add(new ControlTotal(r.GetString(0), r.GetDecimal(1), r.GetDecimal(2), r.GetDecimal(3)));
-        return list;
-    }
-
-    public async Task<decimal> GetTrialBalanceNetAsync(string company, CancellationToken ct)
-    {
-        await using var conn = await ds.OpenConnectionAsync(ct);
-        await using var cmd = new NpgsqlCommand(
-            "SELECT COALESCE(SUM(closing_net), 0) FROM rpt.trial_balance_v WHERE company_code = @c OR company_code = 'ALL'", conn);
-        cmd.Parameters.AddWithValue("c", company);
-        return Convert.ToDecimal(await cmd.ExecuteScalarAsync(ct));
-    }
-
-    public async Task<IReadOnlyList<ManualPosting>> GetManualPostingsAsync(string company, IReadOnlyCollection<string> accounts, CancellationToken ct)
-    {
-        var list = new List<ManualPosting>();
-        await using var conn = await ds.OpenConnectionAsync(ct);
-        await using var cmd = new NpgsqlCommand(
-            "SELECT journal_no, posting_date, account_code, net_amount, description FROM rpt.manual_postings_v WHERE (company_code = @c OR company_code = 'ALL') ORDER BY posting_date DESC LIMIT 25", conn);
-        cmd.Parameters.AddWithValue("c", company);
-        await using var r = await cmd.ExecuteReaderAsync(ct);
-        while (await r.ReadAsync(ct))
-            list.Add(new ManualPosting(r.GetString(0), r.GetDateTime(1), r.GetString(2), r.GetDecimal(3), r.GetString(4)));
-        return list;
-    }
-}

@@ -485,6 +485,34 @@ async function exportReport(fmt) {
   a.click();
 }
 
+async function exportGroupPackPdf() {
+  const btn = $("exportGroupPdfBtn");
+  const prev = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Building PDF...";
+  try {
+    const isAll = !state.company || state.company.toUpperCase() === "ALL";
+    const url = isAll
+      ? "/api/reports/export-group-pack"
+      : `/api/reports/export-company-pack?company=${encodeURIComponent(state.company)}`;
+    const fileName = isAll
+      ? "TERO_CrossCompany_Group_Reports.pdf"
+      : `TERO_SingleCompany_Reports_${state.company}.pdf`;
+    const res = await fetch(url, { method: "POST" });
+    if (!res.ok) throw new Error("PDF Report Pack export failed.");
+    const blob = await res.blob();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = fileName;
+    a.click();
+  } catch (e) {
+    alert(e.message || "Export failed.");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = prev;
+  }
+}
+
 // Event bindings
 $("togglePwdBtn").onclick = () => {
   const inp = $("loginPassword");
@@ -530,6 +558,7 @@ if ($("chartLogScale")) $("chartLogScale").onchange = () => state.lastResult && 
 
 document.querySelectorAll(".chip").forEach(c => c.onclick = () => { $("aiPrompt").value = c.dataset.prompt; });
 document.querySelectorAll(".export-btn").forEach(b => b.onclick = () => exportReport(b.dataset.fmt));
+if ($("exportGroupPdfBtn")) $("exportGroupPdfBtn").onclick = () => exportGroupPackPdf();
 document.querySelectorAll(".tab").forEach(t => t.onclick = () => {
   document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
   t.classList.add("active");
@@ -555,8 +584,12 @@ async function handleAi(autoRun) {
       method: "POST",
       body: JSON.stringify({ question: q, companyCode: state.company })
     });
-    if (res.missingDataNote) {
-      $("aiNotice").textContent = res.missingDataNote;
+    if (res.isOutOfScope || res.guardrailBlocked || res.missingDataNote) {
+      const prefix = res.isOutOfScope ? "Out of Scope: " : (res.guardrailBlocked ? "Guardrail: " : "");
+      const msg = res.missingDataNote || res.explanation || "Request is outside permitted ERP reporting scope.";
+      $("aiNotice").textContent = prefix && !msg.startsWith(prefix) && !msg.startsWith("Out of scope") && !msg.startsWith("Request blocked")
+        ? prefix + msg
+        : msg;
       $("aiNotice").className = "alert alert-error";
       return;
     }
@@ -568,7 +601,9 @@ async function handleAi(autoRun) {
     }
     if (res.request) {
       applyAiRequest(res.request);
-      $("aiNotice").textContent = res.explanation || "Configuration populated below. Review fields or click Generate Report.";
+      const baseNote = res.explanation || "Configuration populated below. Review fields or click Generate Report.";
+      const warnNote = res.guardrailWarnings?.length ? ` (${res.guardrailWarnings.join(" ")})` : "";
+      $("aiNotice").textContent = baseNote + warnNote;
       $("aiNotice").className = "alert";
       if (autoRun) await runReport(collectRequest());
     }
