@@ -36,6 +36,7 @@ What `sql/deploy.sh` applies:
    - `sql/20_rpt_views.pg.sql` (Console master-data `rpt.*` views)
    - `sql/10_report_builder_support.pg.sql` (`rb_reader`, `rb_app`, `rb_designer` roles, `cat.*`, `audit.reportrun` with `SELECT, INSERT, UPDATE` grant for `FOR UPDATE` hash chaining + immutable trigger)
    - `sql/30_report_engine_extensions.pg.sql` (`cat.company_database_map`, `cat.erp_area`, `cat.module_view_map`, `GRANT USAGE ON SCHEMA common TO rb_app`)
+   - `sql/60_cache_and_saved_reports.pg.sql` (`cat.ai_plan_cache` for RBAC-safe L2 AI plan caching, `cat.saved_report` for 0-token Saved Report replay — if not yet applied, `ReportEngine.Web` seamlessly falls back to in-memory L1 cache and `.local/saved_reports.json`)
 2. **On Each Company DB**:
    - `sql/40_company_erp_views.pg.sql` (`sales_invoice_item_v`, `general_ledger_v`, `trial_balance_v`, `control_totals_v`, `manual_postings_v`, `ar_aging_v`, `ap_aging_v`)
    - `sql/50_company_erp_views_extended.pg.sql` (`stock_on_hand_v`, `purchase_invoice_item_v`, `sales_order_item_v`, `sales_return_item_v`, `bank_reconciliation_v`)

@@ -19,6 +19,8 @@ public sealed class AiConfigureResult
     public bool GuardrailBlocked { get; set; }
     public string? GuardrailCategory { get; set; }
     public string[] GuardrailWarnings { get; set; } = [];
+    public bool FromCache { get; set; }
+    public string? CacheSource { get; set; }
 }
 
 public sealed class ViewDraftSuggestionResult
@@ -40,7 +42,13 @@ public sealed class ViewDraftSuggestionResult
 public sealed class AiReportAssistant
 {
     private readonly ILlmClient _llm;
-    public AiReportAssistant(ILlmClient llm) => _llm = llm;
+    private readonly AiPlanCache? _cache;
+
+    public AiReportAssistant(ILlmClient llm, AiPlanCache? cache = null)
+    {
+        _llm = llm;
+        _cache = cache;
+    }
 
     private sealed class Dto
     {
@@ -121,7 +129,7 @@ public sealed class AiReportAssistant
         string companyCode,
         IReadOnlyList<ErpAreaViewMeta> permittedViews,
         CancellationToken ct)
-        => ConfigureAsync(question, companyCode, permittedViews, null, 5000, ct);
+        => ConfigureAsync(question, companyCode, permittedViews, null, 5000, false, ct);
 
     public async Task<AiConfigureResult> ConfigureAsync(
         string question,
@@ -129,6 +137,7 @@ public sealed class AiReportAssistant
         IReadOnlyList<ErpAreaViewMeta> permittedViews,
         IReadOnlySet<string>? blockedColumns = null,
         int maxAllowedRows = 5000,
+        bool forceRefresh = false,
         CancellationToken ct = default)
     {
         if (permittedViews.Count == 0)
@@ -151,6 +160,13 @@ public sealed class AiReportAssistant
                 MissingDataNote = $"{preCheck.Reason} {ScopeGuardrail.FormatPermittedScopeHint(permittedViews)}",
                 Explanation = preCheck.Reason
             };
+        }
+
+        if (_cache is not null && !forceRefresh)
+        {
+            var cached = await _cache.GetAsync(question, companyCode, permittedViews, blockedColumns, maxAllowedRows, ct);
+            if (cached is not null)
+                return cached;
         }
 
         var blocked = blockedColumns ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -225,12 +241,15 @@ public sealed class AiReportAssistant
                 ? dto.Explanation.Trim()
                 : "Routing to deterministic GL vs Trial Balance reconciliation engine.";
 
-            return new AiConfigureResult
+            var reconcileResult = new AiConfigureResult
             {
                 IsReconcile = true,
                 ReconcileAreas = validAreas,
                 Explanation = safeExplanation
             };
+            if (_cache is not null)
+                await _cache.SetAsync(question, companyCode, permittedViews, blockedColumns, maxAllowedRows, reconcileResult, ct);
+            return reconcileResult;
         }
 
         if (!string.IsNullOrWhiteSpace(dto.MissingDataNote) || string.IsNullOrWhiteSpace(dto.ViewName))
@@ -331,13 +350,16 @@ public sealed class AiReportAssistant
             ? dto.Explanation.Trim()
             : GuardrailOutputVerifier.BuildDeterministicConfigSummary(cleanReq, viewMeta);
 
-        return new AiConfigureResult
+        var finalResult = new AiConfigureResult
         {
             IsReconcile = false,
             Request = cleanReq,
             Explanation = explanation,
             GuardrailWarnings = verification.Warnings.ToArray()
         };
+        if (_cache is not null)
+            await _cache.SetAsync(question, companyCode, permittedViews, blockedColumns, maxAllowedRows, finalResult, ct);
+        return finalResult;
     }
 
     private sealed class ViewDraftDto

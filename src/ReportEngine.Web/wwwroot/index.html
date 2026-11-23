@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>TERO ERP — AI Report Engine</title>
-  <link rel="stylesheet" href="app.css?v=5" />
+  <link rel="stylesheet" href="app.css?v=7" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 </head>
 <body>
@@ -152,13 +152,35 @@
             <span class="muted">AI reads permitted schema metadata only — C# builds &amp; executes the SQL</span>
           </div>
           <div class="ai-row">
-            <textarea id="aiPrompt" rows="2" placeholder="Describe the report you want in plain English (e.g. Show total credit sales by customer for last 3 quarters)..."></textarea>
+            <div class="ai-input-wrap">
+              <textarea id="aiPrompt" rows="2" placeholder="Type or speak the report you want in plain English (e.g. Show total credit sales by customer for last 3 quarters)..."></textarea>
+              <div class="voice-bar">
+                <button id="voiceBtn" class="btn-mic" type="button" title="Speak your report request" aria-pressed="false" aria-label="Start voice input">
+                  <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2Z"/></svg>
+                  <span id="voiceLabel">Speak</span>
+                </button>
+                <label class="inline-chk"><input id="voiceAutoRun" type="checkbox" /> Run automatically when I stop speaking</label>
+                <span id="voiceStatus" class="muted" aria-live="polite"></span>
+              </div>
+            </div>
             <div class="ai-btns">
               <button id="aiConfigBtn" class="btn btn-outline-tero">Auto-Configure</button>
               <button id="aiRunBtn" class="btn btn-tero">Ask &amp; Run</button>
+              <label class="inline-chk"><input id="aiBypassCache" type="checkbox" /> Bypass cache</label>
             </div>
           </div>
           <div id="aiNotice" class="alert hidden"></div>
+        </section>
+
+        <!-- Saved Reports / Favorites (0-Token Replay) -->
+        <section id="savedReportsCard" class="tero-card">
+          <div class="card-head-inline">
+            <h2>Saved Reports (0-Token Replay)</h2>
+            <span class="muted">Re-run saved configurations anytime using 0 AI tokens &mdash; live RBAC applied</span>
+          </div>
+          <div id="savedReportsList" class="saved-grid">
+            <span class="muted">No saved reports yet. Configure a report below and click Save Report.</span>
+          </div>
         </section>
 
         <!-- Form-Style Configurator Card (Tero ERP Horizontal Form Layout) -->
@@ -223,6 +245,11 @@
           </div>
 
           <div class="form-actions">
+            <div class="save-inline">
+              <input id="saveReportName" type="text" placeholder="Save report name (0-token replay)..." maxlength="160" />
+              <label class="inline-chk"><input id="saveReportShared" type="checkbox" /> Share</label>
+              <button id="saveReportBtn" class="btn btn-outline-tero" type="button">Save Report</button>
+            </div>
             <button id="runReportBtn" class="btn btn-tero">Generate Report</button>
           </div>
         </section>
@@ -263,19 +290,32 @@
 
           <div id="chartTab" class="tab-content hidden">
             <div class="chart-controls">
-              <label>Chart Type:
+              <label>Chart Type
                 <select id="chartTypeSelect">
-                  <option value="bar">Bar</option>
+                  <option value="bar">Bar (Vertical)</option>
+                  <option value="hbar">Bar (Horizontal)</option>
                   <option value="line">Line</option>
                   <option value="pie">Pie</option>
+                  <option value="doughnut">Doughnut</option>
                 </select>
               </label>
-              <label>Metric:
+              <label>Category / X-Axis
+                <select id="chartLabelSelect"></select>
+              </label>
+              <label>Metric / Value
                 <select id="chartMetricSelect"></select>
               </label>
-              <label class="log-chk"><input id="chartLogScale" type="checkbox" /> Log scale</label>
+              <label>Show
+                <select id="chartLimitSelect">
+                  <option value="10">Top 10</option>
+                  <option value="15" selected>Top 15</option>
+                  <option value="25">Top 25</option>
+                  <option value="0">All</option>
+                </select>
+              </label>
+              <label id="chartLogWrap" class="inline-chk"><input id="chartLogScale" type="checkbox" /> Log scale</label>
             </div>
-            <div id="chartNote" class="muted" style="margin-bottom:6px;"></div>
+            <div id="chartNote" class="chart-note hidden"></div>
             <div class="chart-wrap"><canvas id="reportChart"></canvas></div>
           </div>
 
@@ -309,6 +349,10 @@
           <tbody></tbody>
         </table>
       </div>
+      <div class="cache-bar">
+        <span id="cacheStatsText" class="muted">AI Plan Cache stats loading...</span>
+        <button id="clearAiCacheBtn" class="btn btn-toolbar" type="button">Clear AI Cache</button>
+      </div>
       <h3 style="margin:8px 0 0;font-size:.95rem;">Pending AI-Suggested View Drafts</h3>
       <div class="table-wrap small-table">
         <table id="draftsTable">
@@ -319,6 +363,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=7"></script>
+  <script src="app.js?v=10"></script>
 </body>
 </html>

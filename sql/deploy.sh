@@ -20,7 +20,8 @@ echo "=== 1. Applying Console DB scripts to ${CONSOLE_DB} ==="
 psql "host=${PGHOST} port=${PGPORT} dbname=${CONSOLE_DB} user=${PGUSER}" -v ON_ERROR_STOP=1 \
   -f "${SCRIPT_DIR}/20_rpt_views.pg.sql" \
   -f "${SCRIPT_DIR}/10_report_builder_support.pg.sql" \
-  -f "${SCRIPT_DIR}/30_report_engine_extensions.pg.sql"
+  -f "${SCRIPT_DIR}/30_report_engine_extensions.pg.sql" \
+  -f "${SCRIPT_DIR}/60_cache_and_saved_reports.pg.sql"
 
 for db in ${COMPANY_DBS}; do
   echo "=== 2. Applying Company ERP views to ${db} ==="

@@ -138,7 +138,8 @@ api.MapPost("/reports/ai-configure", async (AiConfigureInput input, HttpContext 
             permittedViews,
             session.BlockedColumns,
             policyOpts.Value.DefaultMaxRows,
-            ct);
+            forceRefresh: input.ForceRefresh,
+            ct: ct);
 
         if (res.IsReconcile && (!session.AllowsView("control_totals_v") || !session.AllowsView("manual_postings_v") || !session.AllowsView("trial_balance_v")))
         {
@@ -204,13 +205,17 @@ api.MapPost("/reports/ai-configure", async (AiConfigureInput input, HttpContext 
     }
 });
 
-// ---- Deterministic C# SQL Compile + Execute + Audit ----
-api.MapPost("/reports/run", async (DynamicReportRequest req, HttpContext ctx, ErpSecurityProvider sec, CompanyDataSourceFactory dsf, IAuditStore audit, IOptions<PolicyOptions> policyOpts, CancellationToken ct) =>
+// ---- Deterministic C# SQL Compile + Execute + Audit (0 LLM Tokens) ----
+static async Task<IResult> ExecuteReportRequestAsync(
+    DynamicReportRequest req,
+    ErpUserSession session,
+    CompanyDataSourceFactory dsf,
+    IAuditStore audit,
+    int maxRows,
+    string auditPrefix,
+    CancellationToken ct)
 {
     var sw = Stopwatch.StartNew();
-    var session = await ResolveActiveSessionAsync(ctx, sec, dsf, req.CompanyCode, ct);
-    if (session is null) return Results.Unauthorized();
-
     var isAll = req.CompanyCode.Equals("ALL", StringComparison.OrdinalIgnoreCase);
     var refCompany = isAll
         ? session.AllowedCompanies.FirstOrDefault()
@@ -225,7 +230,7 @@ api.MapPost("/reports/run", async (DynamicReportRequest req, HttpContext ctx, Er
     if (viewMeta is null)
         return Results.BadRequest(new { error = $"View '{req.ViewName}' is not available or not permitted." });
 
-    var compiled = DynamicReportCompiler.Compile(req, session, viewMeta, DateTime.UtcNow, policyOpts.Value.DefaultMaxRows);
+    var compiled = DynamicReportCompiler.Compile(req, session, viewMeta, DateTime.UtcNow, maxRows);
     if (!compiled.Ok || compiled.Query is null)
         return Results.BadRequest(new { errors = compiled.Errors });
 
@@ -245,7 +250,7 @@ api.MapPost("/reports/run", async (DynamicReportRequest req, HttpContext ctx, Er
 
     var runId = await audit.AppendAsync(new AuditEntry(
         session.UserName,
-        $"[Dynamic:{req.ViewName}] {JsonSerializer.Serialize(req)}",
+        $"{auditPrefix} {JsonSerializer.Serialize(req)}",
         "Answered",
         null,
         compiled.Query.Sql,
@@ -263,6 +268,90 @@ api.MapPost("/reports/run", async (DynamicReportRequest req, HttpContext ctx, Er
         chartType = req.ChartType,
         result
     });
+}
+
+api.MapPost("/reports/run", async (DynamicReportRequest req, HttpContext ctx, ErpSecurityProvider sec, CompanyDataSourceFactory dsf, IAuditStore audit, IOptions<PolicyOptions> policyOpts, CancellationToken ct) =>
+{
+    var session = await ResolveActiveSessionAsync(ctx, sec, dsf, req.CompanyCode, ct);
+    if (session is null) return Results.Unauthorized();
+    return await ExecuteReportRequestAsync(req, session, dsf, audit, policyOpts.Value.DefaultMaxRows, $"[Dynamic:{req.ViewName}]", ct);
+});
+
+// ---- Saved Reports / Favorites (0-Token Deterministic Replay) ----
+api.MapGet("/reports/saved", async (HttpContext ctx, ErpSecurityProvider sec, CompanyDataSourceFactory dsf, ISavedReportStore savedStore, CancellationToken ct) =>
+{
+    var session = await ResolveActiveSessionAsync(ctx, sec, dsf, null, ct);
+    if (session is null) return Results.Unauthorized();
+    return Results.Ok(await savedStore.ListVisibleAsync(session, ct));
+});
+
+api.MapPost("/reports/saved", async (SaveReportInput input, HttpContext ctx, ErpSecurityProvider sec, CompanyDataSourceFactory dsf, ISavedReportStore savedStore, IOptions<PolicyOptions> policyOpts, CancellationToken ct) =>
+{
+    var session = await ResolveActiveSessionAsync(ctx, sec, dsf, input.Request?.CompanyCode, ct);
+    if (session is null) return Results.Unauthorized();
+    if (string.IsNullOrWhiteSpace(input.Name) || input.Name.Trim().Length > 160)
+        return Results.BadRequest(new { error = "Report name is required (max 160 characters)." });
+    if (input.Request is null || string.IsNullOrWhiteSpace(input.Request.ViewName))
+        return Results.BadRequest(new { error = "A valid report configuration is required." });
+
+    var req = input.Request;
+    var isAll = req.CompanyCode.Equals("ALL", StringComparison.OrdinalIgnoreCase);
+    var refCompany = isAll
+        ? session.AllowedCompanies.FirstOrDefault()
+        : session.AllowedCompanies.FirstOrDefault(c => c.Code.Equals(req.CompanyCode, StringComparison.OrdinalIgnoreCase));
+    if (refCompany is null) return Results.Forbid();
+
+    var views = isAll
+        ? await dsf.GetPermittedViewsAcrossCompaniesAsync(session, ct)
+        : await dsf.GetPermittedViewsAsync(session, refCompany, ct);
+    var viewMeta = views.FirstOrDefault(v => v.ViewName.Equals(req.ViewName, StringComparison.OrdinalIgnoreCase));
+    if (viewMeta is null)
+        return Results.BadRequest(new { error = $"View '{req.ViewName}' is not available or not permitted." });
+
+    var compiled = DynamicReportCompiler.Compile(req, session, viewMeta, DateTime.UtcNow, policyOpts.Value.DefaultMaxRows);
+    if (!compiled.Ok)
+        return Results.BadRequest(new { error = "Cannot save invalid report: " + string.Join("; ", compiled.Errors) });
+
+    var saved = await savedStore.SaveAsync(new CreateSavedReportInput(
+        input.Name, input.Description, input.IsShared, req.CompanyCode, viewMeta.ViewName, input.PromptText, req),
+        session.UserName,
+        ct);
+    return Results.Ok(saved);
+});
+
+api.MapPost("/reports/saved/{id:int}/run", async (int id, HttpContext ctx, ErpSecurityProvider sec, CompanyDataSourceFactory dsf, ISavedReportStore savedStore, IAuditStore audit, IOptions<PolicyOptions> policyOpts, CancellationToken ct) =>
+{
+    var baseSession = await ResolveActiveSessionAsync(ctx, sec, dsf, null, ct);
+    if (baseSession is null) return Results.Unauthorized();
+
+    var saved = await savedStore.GetByIdAsync(id, ct);
+    if (saved is null) return Results.NotFound(new { error = "Saved report not found." });
+    if (!saved.IsShared && !saved.OwnerUser.Equals(baseSession.UserName, StringComparison.OrdinalIgnoreCase))
+        return Results.Forbid();
+
+    var session = await ResolveActiveSessionAsync(ctx, sec, dsf, saved.CompanyCode, ct);
+    if (session is null) return Results.Unauthorized();
+
+    var req = JsonSerializer.Deserialize<DynamicReportRequest>(saved.RequestJson, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+    if (req is null) return Results.BadRequest(new { error = "Saved report specification is corrupted." });
+
+    var runResult = await ExecuteReportRequestAsync(req, session, dsf, audit, policyOpts.Value.DefaultMaxRows, $"[SavedReport:#{id}:{saved.Name}]", ct);
+    await savedStore.RecordRunAsync(id, ct);
+    return runResult;
+});
+
+api.MapDelete("/reports/saved/{id:int}", async (int id, HttpContext ctx, ErpSecurityProvider sec, CompanyDataSourceFactory dsf, ISavedReportStore savedStore, CancellationToken ct) =>
+{
+    var session = await ResolveActiveSessionAsync(ctx, sec, dsf, null, ct);
+    if (session is null) return Results.Unauthorized();
+
+    var saved = await savedStore.GetByIdAsync(id, ct);
+    if (saved is null) return Results.NotFound();
+    if (!session.IsAdmin && !saved.OwnerUser.Equals(session.UserName, StringComparison.OrdinalIgnoreCase))
+        return Results.Forbid();
+
+    await savedStore.DeleteAsync(id, session.UserName, session.IsAdmin, ct);
+    return Results.NoContent();
 });
 
 // ---- Deterministic GL / Trial Balance Reconciliation Route ----
@@ -456,6 +545,24 @@ api.MapPost("/admin/company-db-map", async (CompanyDatabaseMapping map, HttpCont
     if (session is null) return Results.Unauthorized();
     if (!session.IsAdmin) return Results.Forbid();
     await dsf.UpsertDatabaseMappingAsync(map, ct);
+    return Results.Ok(new { ok = true });
+});
+
+// ---- Admin AI Plan Cache Stats & Invalidation ----
+api.MapGet("/admin/ai-cache/stats", async (HttpContext ctx, ErpSecurityProvider sec, CompanyDataSourceFactory dsf, AiPlanCache cache, CancellationToken ct) =>
+{
+    var session = await ResolveActiveSessionAsync(ctx, sec, dsf, null, ct);
+    if (session is null) return Results.Unauthorized();
+    if (!session.IsAdmin) return Results.Forbid();
+    return Results.Ok(cache.GetStats());
+});
+
+api.MapDelete("/admin/ai-cache", async (HttpContext ctx, ErpSecurityProvider sec, CompanyDataSourceFactory dsf, AiPlanCache cache, CancellationToken ct) =>
+{
+    var session = await ResolveActiveSessionAsync(ctx, sec, dsf, null, ct);
+    if (session is null) return Results.Unauthorized();
+    if (!session.IsAdmin) return Results.Forbid();
+    await cache.ClearAsync(ct);
     return Results.Ok(new { ok = true });
 });
 
@@ -676,5 +783,6 @@ if (exportGroupIdx >= 0 || exportCompIdx >= 0)
 app.Run();
 
 public sealed record LoginRequest(string UserName, string? Password);
-public sealed record AiConfigureInput(string Question, string CompanyCode);
+public sealed record AiConfigureInput(string Question, string CompanyCode, bool ForceRefresh = false);
+public sealed record SaveReportInput(string Name, string? Description, bool IsShared, string? PromptText, DynamicReportRequest Request);
 public sealed record ReconcileInput(string CompanyCode, string? Question, string[]? Areas);

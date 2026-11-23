@@ -24,6 +24,8 @@ public static class ServiceRegistration
 
         s.AddSingleton<ErpSecurityProvider>();
         s.AddSingleton<CompanyDataSourceFactory>();
+        s.AddSingleton<AiPlanCache>();
+        s.AddSingleton<ISavedReportStore, SqlSavedReportStore>();
         s.AddSingleton<AiReportAssistant>();
 
         s.AddSingleton<SqlQueryExecutor>();
