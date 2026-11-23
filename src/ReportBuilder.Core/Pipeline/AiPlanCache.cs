@@ -270,14 +270,37 @@ public sealed class AiPlanCache
         GuardrailCategory = src.GuardrailCategory,
         GuardrailWarnings = src.GuardrailWarnings.ToArray(),
         FromCache = false,
-        CacheSource = null
+        CacheSource = null,
+        PromptTokens = src.PromptTokens,
+        CompletionTokens = src.CompletionTokens,
+        CachedPromptTokens = src.CachedPromptTokens,
+        TotalTokens = src.TotalTokens,
+        EstimatedCostUsd = src.EstimatedCostUsd,
+        ModelDeployment = src.ModelDeployment,
+        SavedTokens = 0,
+        SavedCostUsd = 0m
     };
 
     private static AiConfigureResult CloneAsCached(AiConfigureResult src, string source)
     {
         var copy = CloneForStorage(src);
+        var hasRecordedTokens = src.TotalTokens > 0;
         copy.FromCache = true;
         copy.CacheSource = source;
+        copy.SavedTokens = hasRecordedTokens ? src.TotalTokens : TokenPricing.DefaultBaselinePlannerTokens;
+        copy.SavedCostUsd = hasRecordedTokens
+            ? src.EstimatedCostUsd
+            : TokenPricing.EstimateCostUsd(
+                "AzureOpenAI",
+                string.IsNullOrWhiteSpace(src.ModelDeployment) ? "gpt-4o" : src.ModelDeployment,
+                TokenPricing.DefaultBaselinePromptTokens,
+                TokenPricing.DefaultBaselineCompletionTokens,
+                0);
+        copy.PromptTokens = 0;
+        copy.CompletionTokens = 0;
+        copy.CachedPromptTokens = 0;
+        copy.TotalTokens = 0;
+        copy.EstimatedCostUsd = 0m;
         return copy;
     }
 

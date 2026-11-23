@@ -20,6 +20,7 @@ public static class ServiceRegistration
         s.Configure<DesignerOptions>(c.GetSection("Designer"));
         s.Configure<TenantsConfig>(c);
 
+        s.AddSingleton<ITokenUsageStore, SqlTokenUsageStore>();
         s.AddHttpClient<ILlmClient, AzureOpenAiClient>(h => h.Timeout = TimeSpan.FromSeconds(120));
 
         s.AddSingleton<ErpSecurityProvider>();

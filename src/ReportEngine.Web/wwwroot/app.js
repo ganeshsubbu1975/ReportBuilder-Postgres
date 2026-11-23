@@ -8,7 +8,12 @@ const state = {
   savedReports: [],
   lastResult: null,
   chart: null,
-  chartDirty: false
+  chartDirty: false,
+  activeWorkspace: "reports",
+  tdDays: 30,
+  tdEntityMode: "user",
+  tdSummary: null,
+  tdCharts: {}
 };
 
 function escHtml(s) {
@@ -74,16 +79,22 @@ async function onSignedIn(session) {
     ? "ViewAll"
     : (session.roles?.length ? session.roles.join(", ") : `Menu: ${(session.allowedMenuIds || []).join(",")}`);
   $("adminBtn").classList.toggle("hidden", !session.isAdmin);
+  if ($("tdUserFilter")) $("tdUserFilter").classList.toggle("hidden", !session.isAdmin);
 
   const companies = session.allowedCompanies || [];
   const opts = companies.map(c => `<option value="${c.code}">${c.code} — ${c.name}</option>`);
   if (companies.length > 1) opts.push(`<option value="ALL">ALL — All Permitted (${companies.length})</option>`);
   $("companySelect").innerHTML = opts.join("");
+  if ($("tdCompanyFilter")) {
+    $("tdCompanyFilter").innerHTML = `<option value="ALL">All Permitted Companies</option>` +
+      companies.map(c => `<option value="${c.code}">${c.code} — ${c.name}</option>`).join("");
+  }
   state.company = companies[0]?.code || "";
   if (state.company) {
     $("companySelect").value = state.company;
     await loadAreasForCompany(state.company);
   }
+  switchWorkspaceView("reports");
   await loadSavedReports();
 }
 
@@ -1131,7 +1142,7 @@ async function handleAi(autoRun) {
       $("aiNotice").className = "alert alert-error";
       return;
     }
-    const cachePrefix = res.fromCache ? `[Cached (${res.cacheSource || "Memory"}) — 0 tokens] ` : "";
+    const cachePrefix = formatAiTokenBadge(res);
     if (res.isReconcile) {
       $("aiNotice").textContent = cachePrefix + (res.explanation || "Routing to deterministic GL / Trial Balance reconciler...");
       $("aiNotice").className = "alert";
@@ -1393,4 +1404,611 @@ init();
   }
 
   btn.onclick = () => { if (listening) rec.stop(); else start(); };
+})();
+
+
+// ---- AI Token Usage & Savings FinOps Dashboard ----
+function fmtUsd(v) {
+  const n = Number(v || 0);
+  if (!Number.isFinite(n) || Math.abs(n) < 0.000001) return "$0.00";
+  if (Math.abs(n) >= 1) return `$${n.toFixed(2)}`;
+  if (Math.abs(n) >= 0.01) return `$${n.toFixed(3)}`;
+  return `$${n.toFixed(4)}`;
+}
+
+function formatAiTokenBadge(res) {
+  if (res.fromCache) {
+    const savedPart = res.savedTokens > 0 ? ` • ~${Number(res.savedTokens).toLocaleString()} tok saved` : "";
+    return `[Cached (${res.cacheSource || "Memory"}) — 0 tokens${savedPart}] `;
+  }
+  if (res.totalTokens > 0) {
+    const dep = res.modelDeployment || "AI";
+    const cost = res.estimatedCostUsd > 0 ? ` • ~${fmtUsd(res.estimatedCostUsd)}` : "";
+    return `[${dep} • ${Number(res.totalTokens).toLocaleString()} tok${cost}] `;
+  }
+  return "";
+}
+
+const TD_OUTCOME_META = {
+  LiveLlm:           { label: "Live AI Call",          color: "#f15a24", pill: "pill-live" },
+  CacheHitMemory:    { label: "Memory Cache (0 tok)",  color: "#10b981", pill: "pill-cache" },
+  CacheHitDatabase:  { label: "DB Cache (0 tok)",      color: "#059669", pill: "pill-cache" },
+  SavedReportReplay: { label: "Saved Replay (0 tok)",  color: "#2563eb", pill: "pill-saved" },
+  GuardrailBlocked:  { label: "Guardrail (0 tok)",     color: "#8b5cf6", pill: "pill-guardrail" },
+  DirectRun:         { label: "Direct SQL (0 tok)",    color: "#64748b", pill: "pill-direct" }
+};
+
+function outcomeMeta(outcome) {
+  return TD_OUTCOME_META[outcome] || { label: outcome || "Other", color: "#94a3b8", pill: "pill-direct" };
+}
+
+function destroyTdChart(key) {
+  if (state.tdCharts[key]) {
+    state.tdCharts[key].destroy();
+    delete state.tdCharts[key];
+  }
+}
+
+function switchWorkspaceView(view) {
+  state.activeWorkspace = view === "tokens" ? "tokens" : "reports";
+  const showTokens = state.activeWorkspace === "tokens";
+  if ($("reportWorkspaceView")) $("reportWorkspaceView").classList.toggle("hidden", showTokens);
+  if ($("tokenDashboardView")) $("tokenDashboardView").classList.toggle("hidden", !showTokens);
+  if ($("navReportsBtn")) $("navReportsBtn").classList.toggle("active", !showTokens);
+  if ($("navTokenDashBtn")) $("navTokenDashBtn").classList.toggle("active", showTokens);
+  if ($("topTokenBtn")) $("topTokenBtn").classList.toggle("active", showTokens);
+  if ($("breadcrumb")) {
+    $("breadcrumb").innerHTML = showTokens
+      ? "Home &nbsp;|&nbsp; Analytics &nbsp;|&nbsp; AI Token Usage &amp; Savings"
+      : "Home &nbsp;|&nbsp; Reports &nbsp;|&nbsp; AI Report Engine";
+  }
+  if (showTokens) {
+    loadTokenDashboard().catch(e => {
+      if ($("tdEmptyBanner")) {
+        $("tdEmptyBanner").classList.remove("hidden");
+        const span = $("tdEmptyBanner").querySelector("span");
+        if (span) span.textContent = e.message || "Could not load token analytics.";
+      }
+    });
+  }
+}
+
+async function loadTokenDashboard() {
+  const days = state.tdDays ?? 30;
+  const comp = $("tdCompanyFilter")?.value || "ALL";
+  const usr = $("tdUserFilter")?.value || "ALL";
+  const url = `/api/analytics/tokens?days=${encodeURIComponent(days)}&company=${encodeURIComponent(comp)}&user=${encodeURIComponent(usr)}`;
+  const summary = await api(url);
+  state.tdSummary = summary;
+
+  if ($("tdCompanyFilter")) {
+    const allowed = state.session?.allowedCompanies || [];
+    const seen = new Set(allowed.map(c => c.code));
+    const opts = [`<option value="ALL">All Permitted Companies</option>`];
+    allowed.forEach(c => opts.push(`<option value="${escHtml(c.code)}">${escHtml(c.code)} — ${escHtml(c.name)}</option>`));
+    (summary.availableCompanies || []).forEach(code => {
+      if (!seen.has(code)) opts.push(`<option value="${escHtml(code)}">${escHtml(code)}</option>`);
+    });
+    $("tdCompanyFilter").innerHTML = opts.join("");
+    if ([...$("tdCompanyFilter").options].some(o => o.value === comp)) $("tdCompanyFilter").value = comp;
+  }
+
+  if ($("tdUserFilter") && summary.isAdminView) {
+    $("tdUserFilter").classList.remove("hidden");
+    const uOpts = [`<option value="ALL">All Users</option>`]
+      .concat((summary.availableUsers || []).map(u => `<option value="${escHtml(u)}">${escHtml(u)}</option>`));
+    $("tdUserFilter").innerHTML = uOpts.join("");
+    if ([...$("tdUserFilter").options].some(o => o.value === usr)) $("tdUserFilter").value = usr;
+  }
+
+  if ($("tdWhatIfModel") && summary.modelRates?.length) {
+    const prev = $("tdWhatIfModel").value;
+    $("tdWhatIfModel").innerHTML = summary.modelRates
+      .map(r => `<option value="${escHtml(r.model)}">${escHtml(r.displayName)} ($${r.inputPer1M}/$${r.outputPer1M} per 1M)</option>`)
+      .join("");
+    if (prev && summary.modelRates.some(r => r.model === prev)) {
+      $("tdWhatIfModel").value = prev;
+    } else {
+      const def = summary.modelRates.find(r => r.model === "gpt-4o-mini") || summary.modelRates[0];
+      if (def) $("tdWhatIfModel").value = def.model;
+    }
+  }
+
+  renderTokenDashboard(summary);
+}
+
+function renderTokenDashboard(s) {
+  if (!s) return;
+
+  const plannerDep = s.configuredDeployments?.planner || s.configuredDeployments?.fast || "default";
+  if ($("tdProviderBadge")) $("tdProviderBadge").textContent = `${s.activeProvider || "AzureOpenAI"} • planner: ${plannerDep}`;
+  if ($("tdScopeSubtitle")) {
+    const scopeLbl = s.isAdminView ? "Organization-wide FinOps view (all permitted users)" : `Personal view (${state.session?.userName || "current user"})`;
+    const winLbl = s.daysWindow > 0 ? `Last ${s.daysWindow} days` : "All recorded history";
+    $("tdScopeSubtitle").textContent = `${scopeLbl} • ${winLbl}`;
+  }
+  if ($("tdEmptyBanner")) $("tdEmptyBanner").classList.toggle("hidden", (s.totalOperations || 0) > 0);
+
+  // 5 KPI Hero Cards
+  const spent = Number(s.totalTokensSpent || 0);
+  const promptTok = Number(s.promptTokens || 0);
+  const compTok = Number(s.completionTokens || 0);
+  const inPct = spent > 0 ? Math.round((promptTok / spent) * 100) : 85;
+  const outPct = Math.max(0, 100 - inPct);
+  if ($("tdKpiSpent")) $("tdKpiSpent").textContent = spent.toLocaleString();
+  if ($("tdRatioIn")) $("tdRatioIn").style.width = `${inPct}%`;
+  if ($("tdRatioOut")) $("tdRatioOut").style.width = `${outPct}%`;
+  if ($("tdKpiSpentSub")) $("tdKpiSpentSub").textContent = `Input: ${promptTok.toLocaleString()} (${inPct}%) • Output: ${compTok.toLocaleString()} (${outPct}%)`;
+
+  const estCost = Number(s.estimatedCostUsd || 0);
+  const avgCostPerCall = s.liveLlmCalls > 0 ? estCost / s.liveLlmCalls : 0;
+  if ($("tdKpiCost")) $("tdKpiCost").textContent = fmtUsd(estCost);
+  if ($("tdKpiCostSub")) $("tdKpiCostSub").textContent = `Avg ${fmtUsd(avgCostPerCall)} / live AI call (${s.liveLlmCalls} calls)`;
+
+  if ($("tdKpiSaved")) $("tdKpiSaved").textContent = Number(s.totalTokensSaved || 0).toLocaleString();
+  if ($("tdKpiSavedSub")) $("tdKpiSavedSub").textContent = `${fmtUsd(s.estimatedSavingsUsd)} avoided via 0-token paths`;
+
+  const zeroPct = Number(s.zeroTokenRatePct || 0);
+  if ($("tdKpiZeroPct")) $("tdKpiZeroPct").textContent = `${zeroPct.toFixed(1)}%`;
+  if ($("tdZeroProgressFill")) $("tdZeroProgressFill").style.width = `${Math.min(100, Math.max(0, zeroPct))}%`;
+  if ($("tdKpiZeroSub")) $("tdKpiZeroSub").textContent = `${s.zeroTokenOps || 0} of ${s.totalOperations || 0} ops used 0 AI tokens`;
+
+  if ($("tdKpiAvgTok")) $("tdKpiAvgTok").textContent = Math.round(Number(s.avgTokensPerLlmCall || 0)).toLocaleString();
+  if ($("tdKpiLatencySub")) {
+    const cachedPart = s.cachedPromptTokens > 0 ? ` • Cached In: ${Number(s.cachedPromptTokens).toLocaleString()}` : "";
+    $("tdKpiLatencySub").textContent = `Avg ${s.avgLatencyMs || 0} ms • Plan Cache Hit: ${Number(s.cacheHitRatePct || 0).toFixed(1)}%${cachedPart}`;
+  }
+
+  // 4-Stage Visual Token Optimization Pipeline
+  const byOut = new Map((s.byOutcome || []).map(x => [x.outcome, x]));
+  const guardB = byOut.get("GuardrailBlocked");
+  const cacheMem = byOut.get("CacheHitMemory");
+  const cacheDb = byOut.get("CacheHitDatabase");
+  const savedR = byOut.get("SavedReportReplay");
+  const directR = byOut.get("DirectRun");
+  const liveB = byOut.get("LiveLlm");
+
+  const guardCnt = guardB?.count || 0;
+  const guardSav = Number(guardB?.tokensSaved || 0);
+  if ($("tdPipeGuardCount")) $("tdPipeGuardCount").textContent = guardCnt.toLocaleString();
+  if ($("tdPipeGuardSaved")) $("tdPipeGuardSaved").textContent = `${guardSav.toLocaleString()} est. tokens avoided`;
+
+  const cacheCnt = (cacheMem?.count || 0) + (cacheDb?.count || 0);
+  const cacheSav = Number(cacheMem?.tokensSaved || 0) + Number(cacheDb?.tokensSaved || 0);
+  if ($("tdPipeCacheCount")) $("tdPipeCacheCount").textContent = cacheCnt.toLocaleString();
+  if ($("tdPipeCacheSaved")) $("tdPipeCacheSaved").textContent = `${cacheSav.toLocaleString()} tokens saved (${cacheMem?.count || 0} mem / ${cacheDb?.count || 0} DB)`;
+
+  const replayCnt = (savedR?.count || 0) + (directR?.count || 0);
+  const replaySav = Number(savedR?.tokensSaved || 0);
+  if ($("tdPipeNoLlmCount")) $("tdPipeNoLlmCount").textContent = replayCnt.toLocaleString();
+  if ($("tdPipeNoLlmSaved")) $("tdPipeNoLlmSaved").textContent = `${savedR?.count || 0} replays (${replaySav.toLocaleString()} tok saved) • ${directR?.count || 0} direct SQL`;
+
+  if ($("tdPipeLiveCount")) $("tdPipeLiveCount").textContent = (liveB?.count || 0).toLocaleString();
+  if ($("tdPipeLiveSpent")) $("tdPipeLiveSpent").textContent = `${Number(liveB?.tokensSpent || 0).toLocaleString()} tokens (${fmtUsd(liveB?.costUsd || 0)})`;
+
+  // FinOps Projections & What-If Comparator
+  if ($("tdProjCost")) $("tdProjCost").textContent = fmtUsd(s.projectedMonthlyCostUsd);
+  if ($("tdProjTokens")) $("tdProjTokens").textContent = `~${Number(s.projectedMonthlyTokens || 0).toLocaleString()} tokens / 30 days`;
+  if ($("tdProjSavedCost")) $("tdProjSavedCost").textContent = fmtUsd(s.estimatedSavingsUsd);
+  if ($("tdProjSavedTokens")) $("tdProjSavedTokens").textContent = `${Number(s.totalTokensSaved || 0).toLocaleString()} tokens avoided in window`;
+
+  updateWhatIfComparison();
+  renderTdTrendChart(s);
+  renderTdMixChart(s);
+  renderTdFeatureChart(s);
+  renderTdEntityChart(s);
+  renderTdActivityTable();
+}
+
+function renderTdTrendChart(s) {
+  destroyTdChart("trend");
+  const canvas = $("tdTrendChart");
+  if (!canvas) return;
+  const pts = s.dailySeries || [];
+  if (pts.length === 0) return;
+
+  const labels = pts.map(p => p.date);
+  state.tdCharts.trend = new Chart(canvas, {
+    type: "bar",
+    data: {
+      labels,
+      datasets: [
+        {
+          type: "bar",
+          label: "Input Tokens",
+          data: pts.map(p => Math.max(0, Number(p.promptTokens) - Number(p.cachedPromptTokens))),
+          backgroundColor: "#2563eb",
+          stack: "spent",
+          borderRadius: 2
+        },
+        {
+          type: "bar",
+          label: "Cached Input",
+          data: pts.map(p => Number(p.cachedPromptTokens)),
+          backgroundColor: "#06b6d4",
+          stack: "spent",
+          borderRadius: 2
+        },
+        {
+          type: "bar",
+          label: "Output Tokens",
+          data: pts.map(p => Number(p.completionTokens)),
+          backgroundColor: "#f15a24",
+          stack: "spent",
+          borderRadius: 2
+        },
+        {
+          type: "line",
+          label: "Tokens Saved (0-Token Ops)",
+          data: pts.map(p => Number(p.savedTokens)),
+          borderColor: "#10b981",
+          backgroundColor: "rgba(16, 185, 129, 0.14)",
+          pointBackgroundColor: "#10b981",
+          pointBorderColor: "#ffffff",
+          pointRadius: 4,
+          borderWidth: 2.5,
+          tension: 0.25,
+          fill: false,
+          stack: "saved"
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
+      scales: {
+        x: {
+          stacked: true,
+          title: { display: true, text: "Date (UTC)", color: "#334155", font: { size: 12, weight: "600" } },
+          ticks: { color: "#475569", font: { size: 11 } },
+          grid: { display: false }
+        },
+        y: {
+          stacked: true,
+          beginAtZero: true,
+          title: { display: true, text: "Tokens", color: "#334155", font: { size: 12, weight: "600" } },
+          ticks: { callback: v => formatCompactNumber(v), color: "#475569", font: { size: 11 } },
+          grid: { color: "#e2e8f0" }
+        }
+      },
+      plugins: {
+        legend: { display: true, position: "top", labels: { boxWidth: 12, padding: 12 } },
+        tooltip: {
+          callbacks: {
+            afterBody(items) {
+              if (!items?.length) return "";
+              const p = pts[items[0].dataIndex];
+              if (!p) return "";
+              return `Live Calls: ${p.llmCalls} (${fmtUsd(p.costUsd)}) | 0-Token Ops: ${p.zeroTokenOps} (${fmtUsd(p.savedCostUsd)} saved)`;
+            }
+          }
+        }
+      }
+    }
+  });
+}
+
+function renderTdMixChart(s) {
+  destroyTdChart("mix");
+  const canvas = $("tdMixChart");
+  if (!canvas) return;
+  const buckets = (s.byOutcome || []).filter(b => b.count > 0);
+  if (buckets.length === 0) return;
+
+  const totalOps = buckets.reduce((acc, b) => acc + b.count, 0);
+  const colors = buckets.map(b => outcomeMeta(b.outcome).color);
+  const labels = buckets.map(b => outcomeMeta(b.outcome).label);
+
+  const centerTextPlugin = {
+    id: "tdMixCenterText",
+    afterDraw(chart) {
+      const meta = chart.getDatasetMeta(0);
+      if (!meta?.data?.length) return;
+      const { x, y } = meta.data[0];
+      const ctx = chart.ctx;
+      ctx.save();
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillStyle = "#0f172a";
+      ctx.font = "700 20px -apple-system, BlinkMacSystemFont, sans-serif";
+      ctx.fillText(`${Number(s.zeroTokenRatePct || 0).toFixed(1)}%`, x, y - 8);
+      ctx.fillStyle = "#64748b";
+      ctx.font = "600 11px -apple-system, BlinkMacSystemFont, sans-serif";
+      ctx.fillText("0-Token Share", x, y + 12);
+      ctx.restore();
+    }
+  };
+
+  state.tdCharts.mix = new Chart(canvas, {
+    type: "doughnut",
+    data: {
+      labels,
+      datasets: [{
+        data: buckets.map(b => b.count),
+        backgroundColor: colors,
+        borderColor: "#ffffff",
+        borderWidth: 2
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      cutout: "62%",
+      plugins: {
+        legend: {
+          display: true,
+          position: window.innerWidth < 860 ? "bottom" : "right",
+          labels: {
+            usePointStyle: true,
+            pointStyle: "circle",
+            padding: 10,
+            generateLabels(chart) {
+              return buckets.map((b, i) => {
+                const pct = totalOps > 0 ? ((b.count / totalOps) * 100).toFixed(1) : "0.0";
+                const vis = chart.getDataVisibility(i);
+                return {
+                  text: `${labels[i]} — ${b.count} (${pct}%)`,
+                  fillStyle: colors[i],
+                  strokeStyle: colors[i],
+                  fontColor: vis ? "#334155" : "#94a3b8",
+                  hidden: !vis,
+                  index: i
+                };
+              });
+            }
+          },
+          onClick(_e, item, legend) {
+            legend.chart.toggleDataVisibility(item.index);
+            legend.chart.update();
+          }
+        },
+        tooltip: {
+          callbacks: {
+            label(ctx) {
+              const b = buckets[ctx.dataIndex];
+              const pct = totalOps > 0 ? ((b.count / totalOps) * 100).toFixed(1) : "0.0";
+              return `${b.count} ops (${pct}%) • Spent: ${Number(b.tokensSpent).toLocaleString()} tok • Saved: ${Number(b.tokensSaved).toLocaleString()} tok`;
+            }
+          }
+        }
+      }
+    },
+    plugins: [centerTextPlugin]
+  });
+}
+
+function renderTdFeatureChart(s) {
+  destroyTdChart("feature");
+  const canvas = $("tdFeatureChart");
+  if (!canvas) return;
+  const rows = s.byFeature || [];
+  if (rows.length === 0) return;
+
+  state.tdCharts.feature = new Chart(canvas, {
+    type: "bar",
+    data: {
+      labels: rows.map(r => r.label || r.feature),
+      datasets: [
+        { label: "Prompt Tokens", data: rows.map(r => Number(r.promptTokens)), backgroundColor: "#2563eb", stack: "spent", borderRadius: 3 },
+        { label: "Completion Tokens", data: rows.map(r => Number(r.completionTokens)), backgroundColor: "#f15a24", stack: "spent", borderRadius: 3 },
+        { label: "Tokens Saved", data: rows.map(r => Number(r.savedTokens)), backgroundColor: "#10b981", stack: "saved", borderRadius: 3 }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      indexAxis: "y",
+      scales: {
+        x: {
+          stacked: true,
+          beginAtZero: true,
+          title: { display: true, text: "Tokens", color: "#334155", font: { size: 12, weight: "600" } },
+          ticks: { callback: v => formatCompactNumber(v), color: "#475569", font: { size: 11 } },
+          grid: { color: "#e2e8f0" }
+        },
+        y: {
+          stacked: true,
+          ticks: { color: "#334155", font: { size: 11 } },
+          grid: { display: false }
+        }
+      },
+      plugins: {
+        legend: { display: true, position: "top", labels: { boxWidth: 12, padding: 12 } },
+        tooltip: {
+          callbacks: {
+            afterBody(items) {
+              if (!items?.length) return "";
+              const r = rows[items[0].dataIndex];
+              return r ? `Operations: ${r.calls} | Spend: ${fmtUsd(r.costUsd)}` : "";
+            }
+          }
+        }
+      }
+    }
+  });
+}
+
+function renderTdEntityChart(s) {
+  destroyTdChart("entity");
+  const canvas = $("tdEntityChart");
+  if (!canvas) return;
+  const list = state.tdEntityMode === "company" ? (s.byCompany || []) : (s.byUser || []);
+  if (list.length === 0) return;
+
+  state.tdCharts.entity = new Chart(canvas, {
+    type: "bar",
+    data: {
+      labels: list.map(x => truncateLabel(x.name, 26)),
+      datasets: [
+        { label: "Tokens Spent", data: list.map(x => Number(x.totalTokens)), backgroundColor: "#f15a24", borderRadius: 3 },
+        { label: "Tokens Saved", data: list.map(x => Number(x.savedTokens)), backgroundColor: "#10b981", borderRadius: 3 }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      indexAxis: "y",
+      scales: {
+        x: {
+          beginAtZero: true,
+          title: { display: true, text: "Tokens", color: "#334155", font: { size: 12, weight: "600" } },
+          ticks: { callback: v => formatCompactNumber(v), color: "#475569", font: { size: 11 } },
+          grid: { color: "#e2e8f0" }
+        },
+        y: {
+          ticks: { color: "#334155", font: { size: 11 } },
+          grid: { display: false }
+        }
+      },
+      plugins: {
+        legend: { display: true, position: "top", labels: { boxWidth: 12, padding: 12 } },
+        tooltip: {
+          callbacks: {
+            title(items) {
+              if (!items?.length) return "";
+              return list[items[0].dataIndex]?.name || items[0].label || "";
+            },
+            afterBody(items) {
+              if (!items?.length) return "";
+              const row = list[items[0].dataIndex];
+              return row ? `Live AI Calls: ${row.llmCalls} | 0-Token Ops: ${row.zeroTokenOps} | Cost: ${fmtUsd(row.costUsd)}` : "";
+            }
+          }
+        }
+      }
+    }
+  });
+}
+
+function updateWhatIfComparison() {
+  const s = state.tdSummary;
+  if (!s || !$("tdWhatIfModel")) return;
+  const selModel = $("tdWhatIfModel").value;
+  const rate = (s.modelRates || []).find(r => r.model === selModel);
+  if (!rate) return;
+
+  if ($("tdWhatIfRateHint")) {
+    $("tdWhatIfRateHint").textContent = rate.inputPer1M === 0 && rate.outputPer1M === 0
+      ? "Local inference ($0.00 API cost)"
+      : `$${rate.inputPer1M} in / $${rate.cachedInputPer1M} cached / $${rate.outputPer1M} out per 1M`;
+  }
+
+  const promptTok = Number(s.promptTokens || 0);
+  const cachedTok = Math.min(promptTok, Number(s.cachedPromptTokens || 0));
+  const uncachedTok = Math.max(0, promptTok - cachedTok);
+  const compTok = Number(s.completionTokens || 0);
+  const simCost =
+    (uncachedTok / 1_000_000) * Number(rate.inputPer1M) +
+    (cachedTok / 1_000_000) * Number(rate.cachedInputPer1M) +
+    (compTok / 1_000_000) * Number(rate.outputPer1M);
+
+  const actualCost = Number(s.estimatedCostUsd || 0);
+  if ($("tdWhatIfSpend")) $("tdWhatIfSpend").textContent = fmtUsd(simCost);
+  if ($("tdWhatIfDelta")) {
+    if (actualCost <= 0 && simCost <= 0) {
+      $("tdWhatIfDelta").textContent = "Run a live AI query to simulate cost differences";
+    } else if (actualCost <= 0) {
+      $("tdWhatIfDelta").textContent = `${fmtUsd(simCost)} vs $0.00 local spend`;
+    } else {
+      const diffPct = ((simCost - actualCost) / actualCost) * 100;
+      const sign = diffPct <= 0 ? "saves" : "+";
+      $("tdWhatIfDelta").textContent = `${diffPct <= 0 ? `Saves ${Math.abs(diffPct).toFixed(0)}%` : `+${diffPct.toFixed(0)}%`} vs actual (${fmtUsd(actualCost)})`;
+    }
+  }
+}
+
+function renderTdActivityTable() {
+  const tbody = $("tdActivityTable")?.querySelector("tbody");
+  if (!tbody) return;
+  const events = state.tdSummary?.recentEvents || [];
+  const search = ($("tdActivitySearch")?.value || "").trim().toLowerCase();
+  const outcomeFilter = $("tdOutcomeFilter")?.value || "ALL";
+
+  const filtered = events.filter(ev => {
+    if (outcomeFilter !== "ALL" && ev.outcome !== outcomeFilter) return false;
+    if (!search) return true;
+    const blob = `${ev.userName} ${ev.companyCode} ${ev.feature} ${ev.outcome} ${ev.deployment} ${ev.questionPreview}`.toLowerCase();
+    return blob.includes(search);
+  });
+
+  if (filtered.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="12" class="muted" style="text-align:center;padding:18px;">No matching token activity events.</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = filtered.map(ev => {
+    const om = outcomeMeta(ev.outcome);
+    const ts = String(ev.occurredAtUtc || "").replace("T", " ").slice(0, 19);
+    const modelLbl = ev.deployment || ev.provider || "-";
+    return `
+      <tr>
+        <td>${escHtml(ts)}</td>
+        <td>${escHtml(ev.userName)}</td>
+        <td>${escHtml(ev.companyCode || "-")}</td>
+        <td>${escHtml(ev.feature)}</td>
+        <td><span class="outcome-pill ${om.pill}">${escHtml(om.label)}</span></td>
+        <td>${escHtml(modelLbl)}</td>
+        <td>${Number(ev.promptTokens || 0).toLocaleString()}</td>
+        <td>${Number(ev.completionTokens || 0).toLocaleString()}</td>
+        <td style="color:#059669;font-weight:600;">${ev.savedTokens > 0 ? Number(ev.savedTokens).toLocaleString() : "-"}</td>
+        <td>${ev.estimatedCostUsd > 0 ? fmtUsd(ev.estimatedCostUsd) : (ev.savedCostUsd > 0 ? `<span style="color:#059669;">-${fmtUsd(ev.savedCostUsd)}</span>` : "$0.00")}</td>
+        <td>${Number(ev.durationMs || 0).toLocaleString()} ms</td>
+        <td title="${escHtml(ev.questionPreview || "")}">${escHtml(truncateLabel(ev.questionPreview || "", 48))}</td>
+      </tr>`;
+  }).join("");
+}
+
+(function initTokenDashboardEvents() {
+  if ($("navReportsBtn")) $("navReportsBtn").onclick = () => switchWorkspaceView("reports");
+  if ($("navTokenDashBtn")) $("navTokenDashBtn").onclick = () => switchWorkspaceView("tokens");
+  if ($("topTokenBtn")) $("topTokenBtn").onclick = () => switchWorkspaceView(state.activeWorkspace === "tokens" ? "reports" : "tokens");
+  if ($("tdBackReportsBtn")) $("tdBackReportsBtn").onclick = () => switchWorkspaceView("reports");
+  if ($("tdEmptyGoReportsBtn")) $("tdEmptyGoReportsBtn").onclick = () => switchWorkspaceView("reports");
+  if ($("tdRefreshBtn")) $("tdRefreshBtn").onclick = () => loadTokenDashboard();
+  if ($("tdCompanyFilter")) $("tdCompanyFilter").onchange = () => loadTokenDashboard();
+  if ($("tdUserFilter")) $("tdUserFilter").onchange = () => loadTokenDashboard();
+
+  document.querySelectorAll("#tdDaysGroup .seg-btn").forEach(btn => {
+    btn.onclick = () => {
+      document.querySelectorAll("#tdDaysGroup .seg-btn").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      state.tdDays = parseInt(btn.dataset.days || "30", 10);
+      loadTokenDashboard();
+    };
+  });
+
+  if ($("tdEntityUserBtn")) {
+    $("tdEntityUserBtn").onclick = () => {
+      state.tdEntityMode = "user";
+      $("tdEntityUserBtn").classList.add("active");
+      $("tdEntityCompBtn")?.classList.remove("active");
+      if (state.tdSummary) renderTdEntityChart(state.tdSummary);
+    };
+  }
+  if ($("tdEntityCompBtn")) {
+    $("tdEntityCompBtn").onclick = () => {
+      state.tdEntityMode = "company";
+      $("tdEntityCompBtn").classList.add("active");
+      $("tdEntityUserBtn")?.classList.remove("active");
+      if (state.tdSummary) renderTdEntityChart(state.tdSummary);
+    };
+  }
+  if ($("tdWhatIfModel")) $("tdWhatIfModel").onchange = () => updateWhatIfComparison();
+  if ($("tdActivitySearch")) $("tdActivitySearch").oninput = () => renderTdActivityTable();
+  if ($("tdOutcomeFilter")) $("tdOutcomeFilter").onchange = () => renderTdActivityTable();
+
+  if ($("tdExportCsvBtn")) {
+    $("tdExportCsvBtn").onclick = () => {
+      const days = state.tdDays ?? 30;
+      const comp = $("tdCompanyFilter")?.value || "ALL";
+      const usr = $("tdUserFilter")?.value || "ALL";
+      const a = document.createElement("a");
+      a.href = `/api/analytics/tokens/export?days=${encodeURIComponent(days)}&company=${encodeURIComponent(comp)}&user=${encodeURIComponent(usr)}`;
+      a.download = "";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    };
+  }
 })();

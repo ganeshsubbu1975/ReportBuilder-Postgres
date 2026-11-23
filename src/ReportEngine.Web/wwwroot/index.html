@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>TERO ERP — AI Report Engine</title>
-  <link rel="stylesheet" href="app.css?v=7" />
+  <link rel="stylesheet" href="app.css?v=8" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 </head>
 <body>
@@ -91,6 +91,13 @@
         </div>
       </div>
 
+      <div class="sidebar-workspace-nav">
+        <div class="sidebar-section-lbl">Workspace</div>
+        <button id="navReportsBtn" class="nav-item active" type="button">Report Generator</button>
+        <button id="navTokenDashBtn" class="nav-item" type="button">Token Usage Dashboard</button>
+      </div>
+
+      <div class="sidebar-section-lbl">Report Modules</div>
       <div class="sidebar-search">
         <input id="menuSearch" type="text" placeholder="Search In Menu" />
       </div>
@@ -125,6 +132,7 @@
             <label for="companySelect">Company</label>
             <select id="companySelect"></select>
           </div>
+          <button id="topTokenBtn" class="btn-token-pill" type="button" title="Open AI Token Usage &amp; Savings Dashboard">Token Analytics</button>
           <div class="user-chip">
             <span id="userDisplay"></span>
             <span id="userRolesPill" class="role-pill"></span>
@@ -134,8 +142,8 @@
         </div>
       </header>
 
-      <!-- Page Body -->
-      <div class="tero-content">
+      <!-- Page Body: Report Generator -->
+      <div id="reportWorkspaceView" class="tero-content">
         <div class="page-title-row">
           <h1 id="pageHeading">AI Report Generator</h1>
           <div class="quick-prompts">
@@ -324,6 +332,222 @@
           </div>
         </section>
       </div>
+
+      <!-- Page Body: AI Token Usage & Savings Dashboard -->
+      <div id="tokenDashboardView" class="tero-content hidden">
+        <div class="dash-header">
+          <div>
+            <div class="dash-title-wrap">
+              <h1>AI Token Usage &amp; Savings Dashboard</h1>
+              <span id="tdProviderBadge" class="provider-badge">Loading provider...</span>
+            </div>
+            <div id="tdScopeSubtitle" class="muted" style="margin-top:3px;">Real-time Azure OpenAI / Ollama spend, 0-token cache savings, and cost projections</div>
+          </div>
+
+          <div class="dash-toolbar">
+            <div id="tdDaysGroup" class="seg-group" role="group" aria-label="Time window">
+              <button type="button" class="seg-btn" data-days="1">24H</button>
+              <button type="button" class="seg-btn" data-days="7">7D</button>
+              <button type="button" class="seg-btn active" data-days="30">30D</button>
+              <button type="button" class="seg-btn" data-days="90">90D</button>
+              <button type="button" class="seg-btn" data-days="0">All</button>
+            </div>
+            <select id="tdCompanyFilter" class="dash-select" aria-label="Filter by company">
+              <option value="ALL">All Permitted Companies</option>
+            </select>
+            <select id="tdUserFilter" class="dash-select hidden" aria-label="Filter by user">
+              <option value="ALL">All Users</option>
+            </select>
+            <button id="tdRefreshBtn" class="btn btn-outline-tero" type="button">Refresh</button>
+            <button id="tdExportCsvBtn" class="btn btn-toolbar" type="button">Export CSV</button>
+            <button id="tdBackReportsBtn" class="btn btn-toolbar" type="button">&larr; Back to Reports</button>
+          </div>
+        </div>
+
+        <div id="tdEmptyBanner" class="dash-empty-banner hidden">
+          <span>No token usage events recorded in this filter window yet. Ask an AI query, run a form report, or replay a Saved Report to see live analytics populate automatically.</span>
+          <button id="tdEmptyGoReportsBtn" class="btn btn-tero" type="button">Go to Report Generator</button>
+        </div>
+
+        <!-- 5 Hero KPI Cards -->
+        <section id="tdKpiGrid" class="kpi-grid">
+          <div class="kpi-card">
+            <div class="kpi-lbl">Total Tokens Spent</div>
+            <div id="tdKpiSpent" class="kpi-val">0</div>
+            <div class="ratio-bar" title="Blue: Input Prompt Tokens | Orange: Completion Output Tokens">
+              <div id="tdRatioIn" class="ratio-in" style="width:85%"></div>
+              <div id="tdRatioOut" class="ratio-out" style="width:15%"></div>
+            </div>
+            <div id="tdKpiSpentSub" class="kpi-sub">Input: 0 &bull; Output: 0</div>
+          </div>
+
+          <div class="kpi-card accent-orange">
+            <div class="kpi-lbl">Estimated AI Spend</div>
+            <div id="tdKpiCost" class="kpi-val">$0.00</div>
+            <div id="tdKpiCostSub" class="kpi-sub">Avg $0.00 / AI call</div>
+          </div>
+
+          <div class="kpi-card accent-green">
+            <div class="kpi-lbl">Tokens &amp; Cost Saved</div>
+            <div id="tdKpiSaved" class="kpi-val">0</div>
+            <div id="tdKpiSavedSub" class="kpi-sub">$0.00 avoided via 0-token paths</div>
+          </div>
+
+          <div class="kpi-card accent-purple">
+            <div class="kpi-lbl">Zero-Token Efficiency</div>
+            <div id="tdKpiZeroPct" class="kpi-val">0%</div>
+            <div class="progress-track"><div id="tdZeroProgressFill" class="progress-fill" style="width:0%"></div></div>
+            <div id="tdKpiZeroSub" class="kpi-sub">0 of 0 ops cost 0 AI tokens</div>
+          </div>
+
+          <div class="kpi-card accent-slate">
+            <div class="kpi-lbl">Avg Tokens &amp; Latency / Call</div>
+            <div id="tdKpiAvgTok" class="kpi-val">0</div>
+            <div id="tdKpiLatencySub" class="kpi-sub">Avg 0 ms &bull; Cache Hit: 0%</div>
+          </div>
+        </section>
+
+        <!-- 4-Stage Visual Token Optimization Pipeline -->
+        <section class="tero-card">
+          <div class="card-head-inline">
+            <h2>Where Tokens Are Saved (Execution Pipeline Flow)</h2>
+            <span id="tdPipelineSummary" class="muted">Guardrails, Caching &amp; Saved Replays eliminate redundant LLM spend before hitting Azure OpenAI</span>
+          </div>
+          <div id="tdPipelineStrip" class="pipeline-strip">
+            <div class="pipe-step">
+              <div class="pipe-title"><span>1. Pre-LLM Guardrails</span><span class="pipe-tag">0 Tokens</span></div>
+              <div id="tdPipeGuardCount" class="pipe-count">0</div>
+              <div id="tdPipeGuardSaved" class="pipe-desc">0 est. tokens avoided</div>
+            </div>
+            <div class="pipe-step">
+              <div class="pipe-title"><span>2. AI Plan Cache (L1/L2)</span><span class="pipe-tag">0 Tokens</span></div>
+              <div id="tdPipeCacheCount" class="pipe-count">0</div>
+              <div id="tdPipeCacheSaved" class="pipe-desc">0 tokens saved</div>
+            </div>
+            <div class="pipe-step">
+              <div class="pipe-title"><span>3. Saved &amp; Direct SQL</span><span class="pipe-tag">0 Tokens</span></div>
+              <div id="tdPipeNoLlmCount" class="pipe-count">0</div>
+              <div id="tdPipeNoLlmSaved" class="pipe-desc">0 est. replay tokens avoided</div>
+            </div>
+            <div class="pipe-step pipe-cost">
+              <div class="pipe-title"><span>4. Live Model Calls</span><span class="pipe-tag">Metered</span></div>
+              <div id="tdPipeLiveCount" class="pipe-count">0</div>
+              <div id="tdPipeLiveSpent" class="pipe-desc">0 tokens ($0.00)</div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Primary Charts Row -->
+        <div class="dash-chart-grid-primary">
+          <section class="tero-card">
+            <div class="card-head-inline">
+              <h2>Token Spend vs. Savings Over Time</h2>
+              <span id="tdTrendSubtitle" class="muted">Daily Prompt + Completion + Cached vs. Avoided Tokens</span>
+            </div>
+            <div class="dash-chart-box"><canvas id="tdTrendChart"></canvas></div>
+          </section>
+
+          <section class="tero-card">
+            <div class="card-head-inline">
+              <h2>Execution Mix</h2>
+              <span id="tdMixSubtitle" class="muted">Live AI vs. Zero-Token Operations</span>
+            </div>
+            <div class="dash-chart-box"><canvas id="tdMixChart"></canvas></div>
+          </section>
+        </div>
+
+        <!-- Secondary Charts Row -->
+        <div class="dash-chart-grid-secondary">
+          <section class="tero-card">
+            <div class="card-head-inline">
+              <h2>Tokens by Feature (Spent vs. Saved)</h2>
+              <span class="muted">Input vs. Output distribution across AI capabilities</span>
+            </div>
+            <div class="dash-chart-box"><canvas id="tdFeatureChart"></canvas></div>
+          </section>
+
+          <section class="tero-card">
+            <div class="card-head-inline">
+              <h2>Top Consumers (Spent vs. Saved)</h2>
+              <div class="seg-group" role="group" aria-label="Consumer breakdown">
+                <button id="tdEntityUserBtn" type="button" class="seg-btn active">By User</button>
+                <button id="tdEntityCompBtn" type="button" class="seg-btn">By Company</button>
+              </div>
+            </div>
+            <div class="dash-chart-box"><canvas id="tdEntityChart"></canvas></div>
+          </section>
+        </div>
+
+        <!-- FinOps Cost Projection & Model What-If Comparator -->
+        <section id="tdFinopsCard" class="tero-card">
+          <div class="card-head-inline">
+            <h2>FinOps Monthly Projection &amp; Model Cost Simulator</h2>
+            <span class="muted">Run-rate forecast based on observed window &amp; side-by-side Azure / Ollama pricing simulation</span>
+          </div>
+          <div class="finops-grid">
+            <div class="finops-stat">
+              <span class="kpi-lbl">30-Day Projected Spend</span>
+              <strong id="tdProjCost">$0.00</strong>
+              <span id="tdProjTokens" class="muted">~0 tokens / 30 days</span>
+            </div>
+            <div class="finops-stat">
+              <span class="kpi-lbl">Window Cost Avoided</span>
+              <strong id="tdProjSavedCost">$0.00</strong>
+              <span id="tdProjSavedTokens" class="muted">0 tokens saved</span>
+            </div>
+            <div class="finops-stat">
+              <label for="tdWhatIfModel" class="kpi-lbl">Compare Against Model</label>
+              <select id="tdWhatIfModel" class="dash-select" style="max-width:100%;"></select>
+              <span id="tdWhatIfRateHint" class="muted">Input / Output per 1M tokens</span>
+            </div>
+            <div class="finops-stat">
+              <span class="kpi-lbl">Simulated Window Spend</span>
+              <strong id="tdWhatIfSpend">$0.00</strong>
+              <span id="tdWhatIfDelta" class="muted">Select a model to compare</span>
+            </div>
+          </div>
+        </section>
+
+        <!-- Recent Token Activity Ledger -->
+        <section class="tero-card">
+          <div class="card-head-inline">
+            <h2>Recent AI &amp; Zero-Token Activity</h2>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+              <input id="tdActivitySearch" type="search" class="dash-select" placeholder="Search prompt, user, model..." style="min-width:210px;" />
+              <select id="tdOutcomeFilter" class="dash-select">
+                <option value="ALL">All Outcomes</option>
+                <option value="LiveLlm">Live AI Call</option>
+                <option value="CacheHitMemory">Memory Cache Hit (0 tok)</option>
+                <option value="CacheHitDatabase">DB Cache Hit (0 tok)</option>
+                <option value="SavedReportReplay">Saved Replay (0 tok)</option>
+                <option value="GuardrailBlocked">Pre-LLM Guardrail (0 tok)</option>
+                <option value="DirectRun">Direct Form SQL (0 tok)</option>
+              </select>
+            </div>
+          </div>
+          <div class="table-wrap" style="max-height:380px;">
+            <table id="tdActivityTable">
+              <thead>
+                <tr>
+                  <th>Time (UTC)</th>
+                  <th>User</th>
+                  <th>Company</th>
+                  <th>Feature</th>
+                  <th>Outcome</th>
+                  <th>Model</th>
+                  <th>Prompt</th>
+                  <th>Completion</th>
+                  <th>Saved</th>
+                  <th>Est. Cost</th>
+                  <th>Latency</th>
+                  <th>Prompt / View</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
     </div>
   </div>
 
@@ -363,6 +587,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=11"></script>
+  <script src="app.js?v=12"></script>
 </body>
 </html>

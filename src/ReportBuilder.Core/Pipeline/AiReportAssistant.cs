@@ -21,6 +21,14 @@ public sealed class AiConfigureResult
     public string[] GuardrailWarnings { get; set; } = [];
     public bool FromCache { get; set; }
     public string? CacheSource { get; set; }
+    public int PromptTokens { get; set; }
+    public int CompletionTokens { get; set; }
+    public int CachedPromptTokens { get; set; }
+    public int TotalTokens { get; set; }
+    public decimal EstimatedCostUsd { get; set; }
+    public string? ModelDeployment { get; set; }
+    public int SavedTokens { get; set; }
+    public decimal SavedCostUsd { get; set; }
 }
 
 public sealed class ViewDraftSuggestionResult
@@ -247,6 +255,7 @@ public sealed class AiReportAssistant
                 ReconcileAreas = validAreas,
                 Explanation = safeExplanation
             };
+            AttachScopeTelemetry(reconcileResult);
             if (_cache is not null)
                 await _cache.SetAsync(question, companyCode, permittedViews, blockedColumns, maxAllowedRows, reconcileResult, ct);
             return reconcileResult;
@@ -357,9 +366,22 @@ public sealed class AiReportAssistant
             Explanation = explanation,
             GuardrailWarnings = verification.Warnings.ToArray()
         };
+        AttachScopeTelemetry(finalResult);
         if (_cache is not null)
             await _cache.SetAsync(question, companyCode, permittedViews, blockedColumns, maxAllowedRows, finalResult, ct);
         return finalResult;
+    }
+
+    private static void AttachScopeTelemetry(AiConfigureResult res)
+    {
+        var scope = TokenUsageContext.Current;
+        if (scope is null || !scope.LlmCalled) return;
+        res.PromptTokens = scope.LastPromptTokens;
+        res.CompletionTokens = scope.LastCompletionTokens;
+        res.CachedPromptTokens = scope.LastCachedPromptTokens;
+        res.TotalTokens = scope.LastTotalTokens;
+        res.EstimatedCostUsd = scope.LastEstimatedCostUsd;
+        res.ModelDeployment = scope.LastDeployment;
     }
 
     private sealed class ViewDraftDto

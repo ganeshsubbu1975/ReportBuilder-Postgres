@@ -24,8 +24,9 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for system diagrams and detailed componen
 - **Multi-Company Fan-Out (`Company = ALL`) & Executive PDF Packs**:
   - Queries execute in parallel across permitted company databases (`CAP`, `TGTM`, `TF`, `TFS`, `TPH`, `TGC`) with automatic `company_code` row tagging and graceful skipping when a view does not exist on a given DB.
   - Supports **Excel (`.xlsx`)**, **PDF**, **CSV**, **JSON**, and 1-click **PDF Report Pack** (single-company or cross-company).
-- **Tamper-Evident Audit Logging (`audit.reportrun`)**:
-  - Insert-only PostgreSQL table with SHA-256 hash chaining (`prev_hash` -> `row_hash`).
+- **Tamper-Evident Audit Logging & FinOps Token Usage Dashboard (`audit.reportrun`, `audit.token_usage`)**:
+  - Insert-only query audit trail (`audit.reportrun`) with SHA-256 hash chaining (`prev_hash` -> `row_hash`).
+  - Graphical **Token Usage & Savings Dashboard** (`Token Analytics` / left sidebar) backed by `audit.token_usage` ([70_token_usage.pg.sql](sql/70_token_usage.pg.sql)) and `GET /api/analytics/tokens`, visualizing live Azure OpenAI / Ollama token spend, estimated USD cost, 0-token savings (Cache Hits, Saved Replays, Pre-LLM Guardrails, Direct SQL), 30-day projections, and interactive Model What-If simulations with CSV export.
 
 ---
 

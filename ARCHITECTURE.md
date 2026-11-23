@@ -95,11 +95,12 @@ sequenceDiagram
 - Supports personal (`is_shared = false`) and team-shared (`is_shared = true`) favorites filtered by live user RBAC (`AllowsView` + `AllowsCompany`).
 - Replaying a saved report (`POST /api/reports/saved/{id}/run`) uses **0 LLM tokens**, re-evaluates permissions dynamically, resolves relative date periods (`last_3_quarters`, `ytd`, etc.) against current UTC time via `DynamicReportCompiler`, executes SQL over `rb_reader`, increments `run_count`, and logs an audit row.
 
-### E. Security, Multi-Company Routing & Audit Trail
+### E. Security, Multi-Company Routing, Audit Trail & Token Telemetry
 - **RBAC (`ErpSecurityProvider`)**: Resolves users, companies, roles, claims, and menu permissions directly from Console DB ASP.NET Identity + ERP tables mapped via `cat.module_view_map`.
 - **Multi-Company Fan-Out (`CompanyDataSourceFactory`)**: Routes single-company queries to the tenant DB (`cat.company_database_map` / `tenants.json`) and executes `Company = ALL` queries in parallel across all unique permitted DBs, tagging each row with its source `company_code` and skipping DBs where a view is absent.
 - **Least-Privilege PostgreSQL Roles**:
   - `rb_reader`: `SELECT` only on `rpt.*` views.
-  - `rb_app`: Metadata management (`cat.*`) + append-only `audit.reportrun` (insert-only trigger blocks `UPDATE`/`DELETE`).
+  - `rb_app`: Metadata management (`cat.*`) + `audit.reportrun` & `audit.token_usage`.
   - `rb_designer`: `CREATE/REPLACE VIEW` in `rpt` schema upon Admin approval.
+- **FinOps Token Usage & Savings Telemetry (`SqlTokenUsageStore`)**: Implemented in [TokenUsageStore.cs](src/ReportBuilder.Core/Data/TokenUsageStore.cs) and [70_token_usage.pg.sql](sql/70_token_usage.pg.sql). `AzureOpenAiClient` extracts real `prompt_tokens`, `completion_tokens`, and `cached_tokens` from API responses inside an `AsyncLocal` `TokenUsageContext` scope, while `Program.cs` records `0`-token savings events for cache hits, saved replays, pre-LLM guardrails, and direct SQL runs — powering the RBAC-scoped `GET /api/analytics/tokens` dashboard and CSV export.
 - **Document & Pack Exports**: [ReportExporters.cs](src/ReportEngine.Web/Services/ReportExporters.cs) and [GroupReportPackService.cs](src/ReportEngine.Web/Services/GroupReportPackService.cs) render Excel (`.xlsx`), QuestPDF single/group packs, CSV, JSON, and zero-data query catalog PDFs.

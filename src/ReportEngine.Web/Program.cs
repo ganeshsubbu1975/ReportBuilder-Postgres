@@ -113,8 +113,14 @@ api.MapGet("/schema/areas", async (string company, HttpContext ctx, ErpSecurityP
     return Results.Ok(await dsf.GetPermittedViewsAsync(session, comp, ct));
 });
 
+static async Task SafeRecordTokenAsync(ITokenUsageStore tokenStore, TokenUsageEvent ev, CancellationToken ct)
+{
+    try { await tokenStore.RecordAsync(ev, ct); }
+    catch { /* telemetry failure must not impact reporting */ }
+}
+
 // ---- Zero-DB-Access AI Query Planner ----
-api.MapPost("/reports/ai-configure", async (AiConfigureInput input, HttpContext ctx, ErpSecurityProvider sec, CompanyDataSourceFactory dsf, AiReportAssistant ai, IAuditStore audit, IOptions<PolicyOptions> policyOpts, CancellationToken ct) =>
+api.MapPost("/reports/ai-configure", async (AiConfigureInput input, HttpContext ctx, ErpSecurityProvider sec, CompanyDataSourceFactory dsf, AiReportAssistant ai, IAuditStore audit, ITokenUsageStore tokenStore, IOptions<PolicyOptions> policyOpts, IOptions<LlmOptions> llmOpts, CancellationToken ct) =>
 {
     var sw = Stopwatch.StartNew();
     var session = await ResolveActiveSessionAsync(ctx, sec, dsf, input.CompanyCode, ct);
@@ -132,6 +138,7 @@ api.MapPost("/reports/ai-configure", async (AiConfigureInput input, HttpContext 
         : await dsf.GetPermittedViewsAsync(session, target, ct);
     try
     {
+        using var tokenScope = TokenUsageContext.Begin(session.UserName, input.CompanyCode, "AiConfigure", input.Question);
         var res = await ai.ConfigureAsync(
             input.Question,
             input.CompanyCode,
@@ -182,6 +189,48 @@ api.MapPost("/reports/ai-configure", async (AiConfigureInput input, HttpContext 
                     };
                 }
             }
+        }
+
+        if (res.FromCache)
+        {
+            await SafeRecordTokenAsync(tokenStore, new TokenUsageEvent
+            {
+                OccurredAtUtc = DateTime.UtcNow,
+                UserName = session.UserName,
+                CompanyCode = input.CompanyCode,
+                Feature = "AiConfigure",
+                Outcome = res.CacheSource == "Database" ? "CacheHitDatabase" : "CacheHitMemory",
+                Provider = llmOpts.Value.Provider,
+                ModelRole = "Planner",
+                Deployment = res.ModelDeployment ?? llmOpts.Value.Deployments.GetValueOrDefault("planner") ?? "",
+                TotalTokens = 0,
+                SavedTokens = res.SavedTokens,
+                SavedCostUsd = TokenPricing.IsLocalProvider(llmOpts.Value.Provider) ? 0m : res.SavedCostUsd,
+                DurationMs = (int)sw.ElapsedMilliseconds,
+                IsEstimated = true,
+                QuestionPreview = input.Question
+            }, ct);
+        }
+        else if (res.GuardrailBlocked && !(TokenUsageContext.Current?.LlmCalled ?? false))
+        {
+            var dep = llmOpts.Value.Deployments.GetValueOrDefault("planner") ?? "gpt-4o";
+            await SafeRecordTokenAsync(tokenStore, new TokenUsageEvent
+            {
+                OccurredAtUtc = DateTime.UtcNow,
+                UserName = session.UserName,
+                CompanyCode = input.CompanyCode,
+                Feature = "AiConfigure",
+                Outcome = "GuardrailBlocked",
+                Provider = llmOpts.Value.Provider,
+                ModelRole = "Planner",
+                Deployment = dep,
+                TotalTokens = 0,
+                SavedTokens = TokenPricing.DefaultBaselinePlannerTokens,
+                SavedCostUsd = TokenPricing.EstimateCostUsd(llmOpts.Value.Provider, dep, TokenPricing.DefaultBaselinePromptTokens, TokenPricing.DefaultBaselineCompletionTokens, 0),
+                DurationMs = (int)sw.ElapsedMilliseconds,
+                IsEstimated = true,
+                QuestionPreview = input.Question
+            }, ct);
         }
 
         if (res.IsOutOfScope || res.GuardrailBlocked)
@@ -270,11 +319,29 @@ static async Task<IResult> ExecuteReportRequestAsync(
     });
 }
 
-api.MapPost("/reports/run", async (DynamicReportRequest req, HttpContext ctx, ErpSecurityProvider sec, CompanyDataSourceFactory dsf, IAuditStore audit, IOptions<PolicyOptions> policyOpts, CancellationToken ct) =>
+api.MapPost("/reports/run", async (DynamicReportRequest req, HttpContext ctx, ErpSecurityProvider sec, CompanyDataSourceFactory dsf, IAuditStore audit, ITokenUsageStore tokenStore, IOptions<PolicyOptions> policyOpts, CancellationToken ct) =>
 {
+    var sw = Stopwatch.StartNew();
     var session = await ResolveActiveSessionAsync(ctx, sec, dsf, req.CompanyCode, ct);
     if (session is null) return Results.Unauthorized();
-    return await ExecuteReportRequestAsync(req, session, dsf, audit, policyOpts.Value.DefaultMaxRows, $"[Dynamic:{req.ViewName}]", ct);
+    var runResult = await ExecuteReportRequestAsync(req, session, dsf, audit, policyOpts.Value.DefaultMaxRows, $"[Dynamic:{req.ViewName}]", ct);
+    if (runResult is IStatusCodeHttpResult sc && (sc.StatusCode is null || sc.StatusCode == 200))
+    {
+        await SafeRecordTokenAsync(tokenStore, new TokenUsageEvent
+        {
+            OccurredAtUtc = DateTime.UtcNow,
+            UserName = session.UserName,
+            CompanyCode = req.CompanyCode,
+            Feature = "DirectRun",
+            Outcome = "DirectRun",
+            Provider = "DeterministicSQL",
+            TotalTokens = 0,
+            SavedTokens = 0,
+            DurationMs = (int)sw.ElapsedMilliseconds,
+            QuestionPreview = $"rpt.{req.ViewName}"
+        }, ct);
+    }
+    return runResult;
 });
 
 // ---- Saved Reports / Favorites (0-Token Deterministic Replay) ----
@@ -319,8 +386,9 @@ api.MapPost("/reports/saved", async (SaveReportInput input, HttpContext ctx, Erp
     return Results.Ok(saved);
 });
 
-api.MapPost("/reports/saved/{id:int}/run", async (int id, HttpContext ctx, ErpSecurityProvider sec, CompanyDataSourceFactory dsf, ISavedReportStore savedStore, IAuditStore audit, IOptions<PolicyOptions> policyOpts, CancellationToken ct) =>
+api.MapPost("/reports/saved/{id:int}/run", async (int id, HttpContext ctx, ErpSecurityProvider sec, CompanyDataSourceFactory dsf, ISavedReportStore savedStore, IAuditStore audit, ITokenUsageStore tokenStore, IOptions<PolicyOptions> policyOpts, IOptions<LlmOptions> llmOpts, CancellationToken ct) =>
 {
+    var sw = Stopwatch.StartNew();
     var baseSession = await ResolveActiveSessionAsync(ctx, sec, dsf, null, ct);
     if (baseSession is null) return Results.Unauthorized();
 
@@ -337,6 +405,26 @@ api.MapPost("/reports/saved/{id:int}/run", async (int id, HttpContext ctx, ErpSe
 
     var runResult = await ExecuteReportRequestAsync(req, session, dsf, audit, policyOpts.Value.DefaultMaxRows, $"[SavedReport:#{id}:{saved.Name}]", ct);
     await savedStore.RecordRunAsync(id, ct);
+    if (runResult is IStatusCodeHttpResult sc && (sc.StatusCode is null || sc.StatusCode == 200))
+    {
+        var dep = llmOpts.Value.Deployments.GetValueOrDefault("planner") ?? "gpt-4o";
+        await SafeRecordTokenAsync(tokenStore, new TokenUsageEvent
+        {
+            OccurredAtUtc = DateTime.UtcNow,
+            UserName = session.UserName,
+            CompanyCode = saved.CompanyCode,
+            Feature = "SavedReplay",
+            Outcome = "SavedReportReplay",
+            Provider = llmOpts.Value.Provider,
+            Deployment = dep,
+            TotalTokens = 0,
+            SavedTokens = TokenPricing.DefaultBaselinePlannerTokens,
+            SavedCostUsd = TokenPricing.EstimateCostUsd(llmOpts.Value.Provider, dep, TokenPricing.DefaultBaselinePromptTokens, TokenPricing.DefaultBaselineCompletionTokens, 0),
+            DurationMs = (int)sw.ElapsedMilliseconds,
+            IsEstimated = true,
+            QuestionPreview = saved.Name
+        }, ct);
+    }
     return runResult;
 });
 
@@ -394,6 +482,7 @@ api.MapPost("/reconcile", async (ReconcileInput input, HttpContext ctx, ErpSecur
     var reconciler = new Reconciler(src);
     var (tbNet, areas) = await reconciler.ExplainAsync(comp.Code, input.Areas ?? [], ct);
 
+    using var _ = TokenUsageContext.Begin(session.UserName, input.CompanyCode, "ReconcileSummary", input.Question ?? "GL vs TB Reconciliation");
     var summary = await presenter.SummarizeReconciliationAsync(input.Question ?? "Reconcile ledger vs trial balance", comp.Code, tbNet, areas, ct);
     var runId = await audit.AppendAsync(new AuditEntry(
         session.UserName,
@@ -548,7 +637,22 @@ api.MapPost("/admin/company-db-map", async (CompanyDatabaseMapping map, HttpCont
     return Results.Ok(new { ok = true });
 });
 
-// ---- Admin AI Plan Cache Stats & Invalidation ----
+// ---- AI Plan Cache & FinOps Token Analytics ----
+static TokenDashboardFilter BuildTokenFilter(ErpUserSession session, int? days, string? company, string? user) =>
+    new(
+        days ?? 30,
+        company,
+        session.IsAdmin ? user : null,
+        session.UserName,
+        session.IsAdmin,
+        session.AllowedCompanies.Select(c => c.Code).ToHashSet(StringComparer.OrdinalIgnoreCase));
+
+static string CsvCell(string? s)
+{
+    var v = (s ?? "").Replace("\"", "\"\"");
+    return v.IndexOfAny([',', '"', '\r', '\n']) >= 0 ? $"\"{v}\"" : v;
+}
+
 api.MapGet("/admin/ai-cache/stats", async (HttpContext ctx, ErpSecurityProvider sec, CompanyDataSourceFactory dsf, AiPlanCache cache, CancellationToken ct) =>
 {
     var session = await ResolveActiveSessionAsync(ctx, sec, dsf, null, ct);
@@ -566,6 +670,56 @@ api.MapDelete("/admin/ai-cache", async (HttpContext ctx, ErpSecurityProvider sec
     return Results.Ok(new { ok = true });
 });
 
+api.MapGet("/analytics/tokens", async (int? days, string? company, string? user, HttpContext ctx, ErpSecurityProvider sec, CompanyDataSourceFactory dsf, ITokenUsageStore tokenStore, IOptions<LlmOptions> llmOpts, AiPlanCache cache, CancellationToken ct) =>
+{
+    var session = await ResolveActiveSessionAsync(ctx, sec, dsf, null, ct);
+    if (session is null) return Results.Unauthorized();
+    var summary = await tokenStore.GetSummaryAsync(BuildTokenFilter(session, days, company, user), llmOpts.Value, cache.GetStats(), ct);
+    return Results.Ok(summary);
+});
+
+api.MapGet("/analytics/tokens/export", async (int? days, string? company, string? user, HttpContext ctx, ErpSecurityProvider sec, CompanyDataSourceFactory dsf, ITokenUsageStore tokenStore, CancellationToken ct) =>
+{
+    var session = await ResolveActiveSessionAsync(ctx, sec, dsf, null, ct);
+    if (session is null) return Results.Unauthorized();
+    var rows = await tokenStore.QueryAsync(BuildTokenFilter(session, days, company, user), 5000, ct);
+    var sb = new System.Text.StringBuilder();
+    sb.AppendLine("EventId,OccurredAtUtc,UserName,CompanyCode,Feature,Outcome,Provider,Role,Deployment,PromptTokens,CompletionTokens,CachedPromptTokens,TotalTokens,SavedTokens,EstimatedCostUsd,SavedCostUsd,DurationMs,IsEstimated,QuestionPreview");
+    foreach (var r in rows)
+    {
+        sb.AppendLine(string.Join(",",
+            r.EventId,
+            r.OccurredAtUtc.ToString("O"),
+            CsvCell(r.UserName),
+            CsvCell(r.CompanyCode),
+            CsvCell(r.Feature),
+            CsvCell(r.Outcome),
+            CsvCell(r.Provider),
+            CsvCell(r.ModelRole),
+            CsvCell(r.Deployment),
+            r.PromptTokens,
+            r.CompletionTokens,
+            r.CachedPromptTokens,
+            r.TotalTokens,
+            r.SavedTokens,
+            r.EstimatedCostUsd.ToString("0.000000", System.Globalization.CultureInfo.InvariantCulture),
+            r.SavedCostUsd.ToString("0.000000", System.Globalization.CultureInfo.InvariantCulture),
+            r.DurationMs,
+            r.IsEstimated,
+            CsvCell(r.QuestionPreview)));
+    }
+    return Results.File(System.Text.Encoding.UTF8.GetBytes(sb.ToString()), "text/csv", $"token_usage_{DateTime.UtcNow:yyyyMMdd}.csv");
+});
+
+api.MapDelete("/admin/token-usage", async (HttpContext ctx, ErpSecurityProvider sec, CompanyDataSourceFactory dsf, ITokenUsageStore tokenStore, CancellationToken ct) =>
+{
+    var session = await ResolveActiveSessionAsync(ctx, sec, dsf, null, ct);
+    if (session is null) return Results.Unauthorized();
+    if (!session.IsAdmin) return Results.Forbid();
+    await tokenStore.ClearAsync(ct);
+    return Results.Ok(new { ok = true });
+});
+
 // ---- AI-Suggested View Drafts + Admin 1-Click Approve & Create ----
 api.MapPost("/views/suggest-draft", async (AiConfigureInput input, HttpContext ctx, ErpSecurityProvider sec, CompanyDataSourceFactory dsf, AiReportAssistant ai, IViewStore viewStore, IAuditStore audit, IOptions<DesignerOptions> designerOpts, IOptions<PolicyOptions> policyOpts, CancellationToken ct) =>
 {
@@ -579,6 +733,7 @@ api.MapPost("/views/suggest-draft", async (AiConfigureInput input, HttpContext c
     if (sources.Count == 0) return Results.BadRequest(new { error = "No source tables available for view design." });
 
     var existing = (await dsf.GetPermittedViewsAsync(session, comp, ct)).Select(v => v.ViewName).ToArray();
+    using var _ = TokenUsageContext.Begin(session.UserName, input.CompanyCode, "ViewDraft", input.Question);
     var suggestion = await ai.SuggestViewDraftAsync(input.Question, sources, policyOpts.Value.BlockedColumns, ct);
     if (!suggestion.Ok || suggestion.Request is null)
     {
